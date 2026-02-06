@@ -1,0 +1,97 @@
+version: '3.8'
+
+# Общий volume для сессий Pyrogram
+volumes:
+  shared_sessions:
+    driver: local
+
+# Сеть для связи между контейнерами
+networks:
+  parserhub_network:
+    driver: bridge
+
+services:
+  # ===== 1. Парсер недвижимости Avito/Cian =====
+  avito_cian_parser:
+    build:
+      context: ../parser_avito_cian # Путь к вашему проекту avito_cian_parser
+      dockerfile: Dockerfile
+    container_name: parser_avito_cian
+    ports:
+      - "8001:8001"  # Доступен снаружи на порту 8001
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8001
+    restart: unless-stopped
+    networks:
+      - parserhub_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== 2. Сервис мониторинга ПВЗ =====
+  workers_service:
+    build:
+      context: ../workers_service  # Путь к вашему проекту workers_service
+      dockerfile: Dockerfile
+    container_name: workers_service
+    ports:
+      - "8002:8002"  # Доступен снаружи на порту 8002
+    volumes:
+      - shared_sessions:/shared/sessions  # Общий volume для сессий
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8002
+      - SESSIONS_DIR=/shared/sessions  # Путь к сессиям внутри контейнера
+    env_file:
+      - ../workers_service/.env  # Берём BOT_TOKEN, API_ID, API_HASH из .env
+    restart: unless-stopped
+    networks:
+      - parserhub_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== 3. ParserHub - Главный оркестровый бот =====
+  parserhub:
+    build:
+      context: .  # Текущая директория (PurserHub)
+      dockerfile: Dockerfile
+    container_name: parserhub_bot
+    ports:
+      - "8003:8003"  # На случай если понадобится HTTP API
+    volumes:
+      - shared_sessions:/shared/sessions  # Общий volume для сессий
+      - ./data:/app/data  # Локальная директория для БД и логов
+    environment:
+      # Пути внутри контейнера
+      - SESSIONS_DIR=/shared/sessions
+      - DB_PATH=/app/data/parserhub.db
+      - LOG_PATH=/app/data/parserhub.log
+
+      # URL микросервисов (по именам контейнеров!)
+      - WORKERS_SERVICE_URL=http://workers_service:8002
+      - REALTY_SERVICE_URL=http://avito_cian_parser:8001
+
+      # Токен бота и API (будут взяты из .env или заданы здесь)
+      # BOT_TOKEN=${BOT_TOKEN}
+      # API_ID=${API_ID}
+      # API_HASH=${API_HASH}
+    env_file:
+      - .env  # Берём BOT_TOKEN, API_ID, API_HASH из .env
+    depends_on:
+      - workers_service
+      - avito_cian_parser
+    restart: unless-stopped
+    networks:
+      - parserhub_network
+
+# ===== ВАЖНО! =====
+# 1. Все контейнеры в одной сети parserhub_network
+# 2. shared_sessions volume подключен к workers_service и parserhub
+# 3. ParserHub использует имена контейнеров: workers_service, avito_cian_parser
+# 4. Порты 8001, 8002, 8003 доступны на хосте для отладки
