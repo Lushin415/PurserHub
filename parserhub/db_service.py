@@ -57,6 +57,27 @@ class DatabaseService:
                 )
             """)
 
+            # Таблица администраторов
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id INTEGER PRIMARY KEY,
+                    added_by INTEGER,
+                    created_at TEXT NOT NULL
+                )
+            """)
+
+            # Таблица платежей (для статистики доходов)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    plan TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'RUB',
+                    created_at TEXT NOT NULL
+                )
+            """)
+
             await db.commit()
             logger.info(f"База данных инициализирована: {self.db_path}")
 
@@ -216,3 +237,87 @@ class DatabaseService:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM active_tasks WHERE task_id = ?", (task_id,))
             await db.commit()
+
+    # ===== Администраторы =====
+
+    async def is_admin(self, user_id: int) -> bool:
+        """Проверить является ли пользователь администратором (из БД)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT user_id FROM admins WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
+    async def get_admins(self) -> list[dict]:
+        """Получить список администраторов из БД"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM admins ORDER BY created_at") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def add_admin(self, user_id: int, added_by: int):
+        """Добавить администратора"""
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO admins (user_id, added_by, created_at) VALUES (?, ?, ?)",
+                (user_id, added_by, now),
+            )
+            await db.commit()
+
+    async def remove_admin(self, user_id: int):
+        """Удалить администратора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    # ===== Платежи =====
+
+    async def log_payment(self, user_id: int, plan: str, amount: int, currency: str = "RUB"):
+        """Записать платёж"""
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO payments (user_id, plan, amount, currency, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, plan, amount, currency, now),
+            )
+            await db.commit()
+
+    async def get_revenue_stats(self) -> dict:
+        """Статистика доходов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Всего
+            async with db.execute("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM payments") as cur:
+                row = await cur.fetchone()
+                total_amount = row[0]
+                total_count = row[1]
+
+            # За текущий месяц
+            month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0).isoformat()
+            async with db.execute(
+                "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM payments WHERE created_at >= ?",
+                (month_start,),
+            ) as cur:
+                row = await cur.fetchone()
+                month_amount = row[0]
+                month_count = row[1]
+
+            # За сегодня
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0).isoformat()
+            async with db.execute(
+                "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM payments WHERE created_at >= ?",
+                (today_start,),
+            ) as cur:
+                row = await cur.fetchone()
+                today_amount = row[0]
+                today_count = row[1]
+
+            return {
+                "total_amount": total_amount,
+                "total_count": total_count,
+                "month_amount": month_amount,
+                "month_count": month_count,
+                "today_amount": today_amount,
+                "today_count": today_count,
+            }

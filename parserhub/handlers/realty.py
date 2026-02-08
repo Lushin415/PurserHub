@@ -15,6 +15,8 @@ from parserhub.db_service import DatabaseService
 from parserhub.api_client import RealtyAPI
 from parserhub.models import ActiveTask
 from parserhub.validators import Validators, AntiSpam
+from parserhub.services.subscription_service import SubscriptionService
+from parserhub.handlers.admin import _is_admin
 from parserhub.handlers.start import cancel_and_return_to_menu
 
 
@@ -246,6 +248,18 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
     realty_api: RealtyAPI = context.bot_data["realty_api"]
+
+    # Проверка подписки (временно отключена)
+    # if not await _is_admin(user_id, db):
+    #     sub_service: SubscriptionService = context.bot_data["subscription"]
+    #     if not await sub_service.has_active(user_id):
+    #         from parserhub.handlers.subscription import subscription_keyboard
+    #         await query.edit_message_text(
+    #             "🔒 Для запуска парсинга необходима активная подписка.",
+    #             reply_markup=subscription_keyboard(),
+    #             parse_mode="HTML",
+    #         )
+    #         return ConversationHandler.END
 
     # Получить настройки
     settings = await db.get_settings(user_id)

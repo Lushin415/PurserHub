@@ -14,6 +14,7 @@ class CB:
     WORKERS = "workers"
     REALTY = "realty"
     BLACKLIST = "blacklist"
+    SUBSCRIPTION = "subscription_menu"
     SETTINGS = "settings"
 
 
@@ -41,6 +42,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👷 Мониторинг ПВЗ", callback_data=CB.WORKERS)],
         [InlineKeyboardButton("🏠 Парсинг недвижимости", callback_data=CB.REALTY)],
         [InlineKeyboardButton("⚫ Черный список", callback_data=CB.BLACKLIST)],
+        # [InlineKeyboardButton("💳 Подписка", callback_data=CB.SUBSCRIPTION)],
         [InlineKeyboardButton("⚙️ Настройки", callback_data=CB.SETTINGS)],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)

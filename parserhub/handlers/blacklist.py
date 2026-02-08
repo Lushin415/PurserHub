@@ -296,13 +296,14 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # Сохраняем данные в user_data для следующего шага
             context.user_data["bl_add_chat_username"] = normalized_username
             context.user_data["bl_add_chat_title"] = chat_title
+            context.user_data["bl_chat_topics"] = {t["id"]: t["name"] for t in topics}
 
             keyboard = []
             for topic in topics:
                 keyboard.append([
                     InlineKeyboardButton(
                         f"📌 {topic['name']}",
-                        callback_data=f"{BlacklistCB.SELECT_TOPIC}{topic['id']}|{topic['name'][:30]}"
+                        callback_data=f"{BlacklistCB.SELECT_TOPIC}{topic['id']}"
                     )
                 ])
 
@@ -371,10 +372,9 @@ async def receive_topic_selection(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith(BlacklistCB.SELECT_TOPIC):
         # Пользователь выбрал конкретный топик
-        topic_data = data[len(BlacklistCB.SELECT_TOPIC):]
-        parts = topic_data.split("|", 1)
-        topic_id = int(parts[0])
-        topic_name = parts[1] if len(parts) > 1 else f"Topic {topic_id}"
+        topic_id = int(data[len(BlacklistCB.SELECT_TOPIC):])
+        topics_map = context.user_data.get("bl_chat_topics", {})
+        topic_name = topics_map.get(topic_id, f"Topic {topic_id}")
 
         try:
             result = await workers_api.add_blacklist_chat(
@@ -395,6 +395,7 @@ async def receive_topic_selection(update: Update, context: ContextTypes.DEFAULT_
     # Очищаем user_data
     context.user_data.pop("bl_add_chat_username", None)
     context.user_data.pop("bl_add_chat_title", None)
+    context.user_data.pop("bl_chat_topics", None)
 
     return ConversationHandler.END
 

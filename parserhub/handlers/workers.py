@@ -16,6 +16,8 @@ from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI
 from parserhub.models import ActiveTask, WorkersFilters
 from parserhub.validators import Validators, AntiSpam
+from parserhub.services.subscription_service import SubscriptionService
+from parserhub.handlers.admin import _is_admin
 from parserhub.handlers.start import cancel_and_return_to_menu
 
 
@@ -153,8 +155,8 @@ async def receive_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     context.user_data["workers_chats"] = normalized_chats
 
+    # Убрали кнопку пропуска
     keyboard = [
-        [InlineKeyboardButton("⏭️ Пропустить даты", callback_data=WorkersCB.SKIP_DATES)],
         [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -162,8 +164,7 @@ async def receive_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text(
         "📅 Фильтр по датам\n\n"
         "Введите дату начала (формат: YYYY-MM-DD):\n"
-        "<code>2026-02-05</code>\n\n"
-        "Или пропустите, если фильтр не нужен.",
+        "<code>2026-12-31</code>",
         reply_markup=reply_markup,
         parse_mode="HTML",
     )
@@ -183,8 +184,8 @@ async def receive_date_from(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["workers_date_from"] = date_str
 
+    # Убрали кнопку пропуска
     keyboard = [
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data=WorkersCB.SKIP_DATES)],
         [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -220,24 +221,20 @@ async def receive_date_to(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return await ask_prices(update, context)
 
 
-async def skip_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Пропуск фильтра по датам"""
-    query = update.callback_query
-    await query.answer()
-    return await ask_prices(update, context)
+
 
 
 async def ask_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Запросить фильтр по ценам"""
+    # Убрали кнопку пропуска
     keyboard = [
-        [InlineKeyboardButton("⏭️ Пропустить цены", callback_data=WorkersCB.SKIP_PRICES)],
         [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
         "💰 Фильтр по цене\n\n"
-        "Введите минимальную цену (или пропустите):\n"
+        "Введите минимальную цену:\n"
         "<code>2000</code>"
     )
 
@@ -265,8 +262,8 @@ async def receive_min_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["workers_min_price"] = price
 
+    # Убрали кнопку пропуска
     keyboard = [
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data=WorkersCB.SKIP_PRICES)],
         [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -305,11 +302,7 @@ async def receive_max_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return await show_confirmation(update, context)
 
 
-async def skip_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Пропуск фильтра по ценам"""
-    query = update.callback_query
-    await query.answer()
-    return await show_confirmation(update, context)
+
 
 
 async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -368,6 +361,18 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     db: DatabaseService = context.bot_data["db"]
     session_mgr: SessionManager = context.bot_data["session_manager"]
     workers_api: WorkersAPI = context.bot_data["workers_api"]
+
+    # Проверка подписки (временно отключена)
+    # if not await _is_admin(user_id, db):
+    #     sub_service: SubscriptionService = context.bot_data["subscription"]
+    #     if not await sub_service.has_active(user_id):
+    #         from parserhub.handlers.subscription import subscription_keyboard
+    #         await query.edit_message_text(
+    #             "🔒 Для запуска мониторинга необходима активная подписка.",
+    #             reply_markup=subscription_keyboard(),
+    #             parse_mode="HTML",
+    #         )
+    #         return ConversationHandler.END
 
     # Получить настройки
     settings = await db.get_settings(user_id)
@@ -651,19 +656,19 @@ def register_workers_handlers(app):
             ],
             WorkersState.INPUT_DATE_FROM: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_date_from),
-                CallbackQueryHandler(skip_dates, pattern=f"^{WorkersCB.SKIP_DATES}$"),
+                # Удален handler skip_dates
             ],
             WorkersState.INPUT_DATE_TO: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_date_to),
-                CallbackQueryHandler(skip_dates, pattern=f"^{WorkersCB.SKIP_DATES}$"),
+                # Удален handler skip_dates
             ],
             WorkersState.INPUT_MIN_PRICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_min_price),
-                CallbackQueryHandler(skip_prices, pattern=f"^{WorkersCB.SKIP_PRICES}$"),
+                # Удален handler skip_prices
             ],
             WorkersState.INPUT_MAX_PRICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_max_price),
-                CallbackQueryHandler(skip_prices, pattern=f"^{WorkersCB.SKIP_PRICES}$"),
+                # Удален handler skip_prices
             ],
             WorkersState.CONFIRM: [
                 CallbackQueryHandler(confirm_start, pattern=f"^{WorkersCB.CONFIRM_START}$")

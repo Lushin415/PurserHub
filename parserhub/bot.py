@@ -1,5 +1,6 @@
 """Главный модуль Telegram бота ParserHub"""
 import sys
+import asyncio
 from pathlib import Path
 from loguru import logger
 from telegram import BotCommand
@@ -9,14 +10,17 @@ from parserhub.config import config
 from parserhub.db_service import DatabaseService
 from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI, RealtyAPI
+from parserhub.services.subscription_service import SubscriptionService
 
 # Импорт handlers
 from parserhub.handlers.start import register_start_handlers
 from parserhub.handlers.auth import register_auth_handlers
 from parserhub.handlers.settings import register_settings_handlers
+from parserhub.handlers.subscription import register_subscription_handlers
 from parserhub.handlers.workers import register_workers_handlers
 from parserhub.handlers.realty import register_realty_handlers
 from parserhub.handlers.blacklist import register_blacklist_handlers
+from parserhub.handlers.admin import register_admin_handlers
 
 
 def setup_logging():
@@ -62,6 +66,10 @@ async def post_init(application: Application):
         api_hash=config.API_HASH,
     )
 
+    # Инициализировать сервис подписок
+    subscription_service = SubscriptionService(config.DB_PATH)
+    await subscription_service.init_table()
+
     # Создать API клиенты
     workers_api = WorkersAPI(config.WORKERS_SERVICE_URL)
     realty_api = RealtyAPI(config.REALTY_SERVICE_URL)
@@ -69,8 +77,12 @@ async def post_init(application: Application):
     # Сохранить в bot_data
     application.bot_data["db"] = db
     application.bot_data["session_manager"] = session_manager
+    application.bot_data["subscription"] = subscription_service
     application.bot_data["workers_api"] = workers_api
     application.bot_data["realty_api"] = realty_api
+
+    # Запустить фоновую очистку истёкших подписок
+    asyncio.create_task(_subscription_cleaner_loop(application))
 
     # Установить команды бота (Menu Button)
     commands = [
@@ -81,6 +93,21 @@ async def post_init(application: Application):
     logger.info("Команды бота установлены (Menu Button)")
 
     logger.info("Инициализация завершена")
+
+
+async def _subscription_cleaner_loop(application: Application):
+    """Фоновая задача: удаление истёкших подписок раз в сутки"""
+    while True:
+        try:
+            await asyncio.sleep(24 * 60 * 60)  # раз в сутки
+            service: SubscriptionService = application.bot_data["subscription"]
+            removed = await service.delete_expired()
+            if removed:
+                logger.info(f"Expired subscriptions cleaned: {removed}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Subscription cleaner error: {e}")
 
 
 async def post_shutdown(application: Application):
@@ -121,15 +148,17 @@ def main():
     register_start_handlers(app)
     register_auth_handlers(app)
     register_settings_handlers(app)
+    # register_subscription_handlers(app)  # Подписки — временно отключены
     register_workers_handlers(app)
     register_realty_handlers(app)
     register_blacklist_handlers(app)
+    # register_admin_handlers(app)  # Админка — временно отключена
 
     logger.info("Handlers зарегистрированы")
 
     # Запуск бота
     logger.info("Запуск polling...")
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    app.run_polling(allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 
 if __name__ == "__main__":

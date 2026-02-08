@@ -8,6 +8,7 @@ class Config(BaseSettings):
 
     # Telegram Bot
     BOT_TOKEN: str
+    ADMIN_ID: int = 0
 
     # Telegram API (для Pyrogram сессий)
     API_ID: int
@@ -21,6 +22,9 @@ class Config(BaseSettings):
     DB_PATH: str = "parserhub.db"
     SESSIONS_DIR: str = "./sessions"
     LOG_PATH: str = "parserhub.log"
+
+    # Payments (YooKassa через BotFather)
+    PROVIDER_TOKEN: str = ""
 
     # Server
     HOST: str = "0.0.0.0"
