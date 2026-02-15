@@ -13,7 +13,7 @@ from loguru import logger
 from parserhub.db_service import DatabaseService
 from parserhub.session_manager import SessionManager
 from parserhub.validators import Validators
-from parserhub.handlers.start import cancel_and_return_to_menu
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
 
 
 # Состояния для ConversationHandler
@@ -88,10 +88,11 @@ async def show_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Для работы с мониторингом и черным списком необходимо авторизовать Telegram аккаунт."
     )
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=text, reply_markup=reply_markup, parse_mode="HTML"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -162,7 +163,10 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
             await update.message.reply_text(
                 "📱 Код отправлен в Telegram!\n\n"
-                "Введите код из сообщения:",
+                "⚠️ ВАЖНО: НЕ открывайте уведомление в Telegram!\n"
+                "Просто запомните или скопируйте код.\n\n"
+                "Введите код ЧЕРЕЗ ПРОБЕЛЫ:\n"
+                "Например: 1 2 3 4 5",
                 reply_markup=reply_markup,
             )
             return AuthState.WAITING_CODE
@@ -178,7 +182,8 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получен код подтверждения"""
-    code = update.message.text.strip()
+    # Убираем пробелы из кода (пользователь вводит "1 2 3 4 5" → "12345")
+    code = update.message.text.strip().replace(" ", "")
     user_id = update.effective_user.id
     session_type = context.user_data.get("auth_session_type")
 
@@ -356,7 +361,7 @@ def register_auth_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_auth, pattern="^auth_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
+            MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
     )
     app.add_handler(auth_conv)

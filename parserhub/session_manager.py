@@ -1,4 +1,6 @@
 """Управление Pyrogram сессиями пользователей"""
+import os
+import asyncio
 from pathlib import Path
 from typing import Dict, Literal, Optional
 from loguru import logger
@@ -51,6 +53,12 @@ class SessionManager:
         logger.info(f"[AUTH START] session_path={session_name}")
 
         try:
+            # Принудительная чистка старой сессии (фикс бага авторизации)
+            session_file = Path(self.get_session_path(user_id, session_type) + ".session")
+            if session_file.exists():
+                logger.warning(f"[AUTH START] Удаление старой сессии: {session_file}")
+                os.remove(session_file)
+
             # Создать клиент
             # ВАЖНО: НЕ передаём phone_number, иначе Pyrogram автоматически начнёт авторизацию!
             # Мы делаем авторизацию вручную через send_code() и sign_in()
@@ -61,10 +69,18 @@ class SessionManager:
                 api_hash=self.api_hash,
                 # phone_number НЕ УКАЗЫВАЕМ - делаем авторизацию вручную!
                 in_memory=False,  # Сохранять на диск
+                # Параметры "реального устройства" для обхода блокировок Telegram
+                device_model="Samsung SM-G998B",
+                system_version="Android 12",
+                app_version="8.4.1",
+                lang_code="ru",
             )
 
             logger.debug(f"[AUTH START] Подключение...")
             await client.connect()
+
+            # Задержка для стабильности (фикс бага авторизации)
+            await asyncio.sleep(1.5)
 
             # Отправить код
             logger.debug(f"[AUTH START] Отправка кода на {phone}...")
@@ -118,7 +134,7 @@ class SessionManager:
         logger.debug(f"[CONFIRM CODE] client connected: {client.is_connected}")
 
         try:
-            # Попытка войти с кодом
+            # Попытка войти с кодом (пробелы уже убраны в handlers/auth.py)
             logger.info(f"[CONFIRM CODE] Вызов client.sign_in(phone={phone}, code_hash={phone_code_hash[:15]}..., code={code})...")
             await client.sign_in(phone, phone_code_hash, code)
             logger.info(f"[CONFIRM CODE] ✅ Авторизация успешна для user {user_id}")
