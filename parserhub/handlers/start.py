@@ -17,13 +17,14 @@ class MenuButton:
     SETTINGS = "⚙️ Настройки"
     ADMIN = "🔧 Админ-панель"
     BACK = "🔙 Назад"
+    CANCEL = "❌ Отмена"
 
 
 # Фильтр для кнопок главного меню (используется в fallbacks всех ConversationHandler)
 MAIN_MENU_FILTER = filters.Regex(
     f"^({MenuButton.ACCOUNT}|{MenuButton.WORKERS}|{MenuButton.REALTY}|"
     f"{MenuButton.BLACKLIST}|{MenuButton.SUBSCRIPTION}|{MenuButton.SETTINGS}|"
-    f"{MenuButton.ADMIN}|{MenuButton.BACK})$"
+    f"{MenuButton.ADMIN}|{MenuButton.BACK}|{MenuButton.CANCEL})$"
 )
 
 
@@ -51,16 +52,21 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
 
+    is_admin = await _is_admin(user_id, db)
+
     keyboard = [
         [KeyboardButton(MenuButton.ACCOUNT)],
         [KeyboardButton(MenuButton.WORKERS)],
         [KeyboardButton(MenuButton.REALTY)],
         [KeyboardButton(MenuButton.BLACKLIST)],
-        [KeyboardButton(MenuButton.SUBSCRIPTION)],
-        [KeyboardButton(MenuButton.SETTINGS)],
     ]
 
-    if await _is_admin(user_id, db):
+    if not is_admin:
+        keyboard.append([KeyboardButton(MenuButton.SUBSCRIPTION)])
+
+    keyboard.append([KeyboardButton(MenuButton.SETTINGS)])
+
+    if is_admin:
         keyboard.append([KeyboardButton(MenuButton.ADMIN)])
     reply_markup = ReplyKeyboardMarkup(
         keyboard,
@@ -114,7 +120,7 @@ async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == MenuButton.ADMIN:
         from parserhub.handlers.admin import admin_command
         await admin_command(update, context)
-    elif text == MenuButton.BACK:
+    elif text == MenuButton.BACK or text == MenuButton.CANCEL:
         await show_main_menu(update, context)
 
 

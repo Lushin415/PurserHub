@@ -28,6 +28,8 @@ class AdminCB:
     REMOVE_ADMIN = "admin_rm_"  # + user_id
     PVZ_CHATS = "admin_pvz_chats"  # Управление чатами ПВЗ
     BLACKLIST_CHATS = "admin_bl_chats"  # Управление чатами ЧС
+    MANAGE_PRICES = "admin_prices"
+    EDIT_PRICE = "admin_edit_price_"  # + plan
     CLOSE = "admin_close"
 
 
@@ -37,6 +39,7 @@ class AdminState:
     INPUT_USER_FOR_ADMIN = 3
     INPUT_PVZ_CHATS = 4
     INPUT_BLACKLIST_CHATS = 5
+    INPUT_NEW_PRICE = 6
 
 
 async def _is_admin(user_id: int, db: DatabaseService) -> bool:
@@ -77,6 +80,7 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📋 Подписки", callback_data=AdminCB.SUBSCRIPTIONS)],
         [InlineKeyboardButton("🎁 Выдать подписку", callback_data=AdminCB.GRANT_SUB)],
+        [InlineKeyboardButton("💰 Цены подписок", callback_data=AdminCB.MANAGE_PRICES)],
         [InlineKeyboardButton("💰 Доходы", callback_data=AdminCB.REVENUE)],
         [InlineKeyboardButton("👥 Администраторы", callback_data=AdminCB.ADMINS_LIST)],
         [InlineKeyboardButton("📝 Чаты ПВЗ", callback_data=AdminCB.PVZ_CHATS)],
@@ -186,7 +190,8 @@ async def grant_sub_select_plan(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         await service.activate(user_id, plan)
-        plan_label = SubscriptionService.PLANS[plan]["label"]
+        plans = await service.get_plans()
+        plan_label = plans.get(plan, {}).get("label", plan)
 
         await query.edit_message_text(
             f"✅ Подписка выдана!\n\n"
@@ -243,10 +248,12 @@ async def show_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard_rows = []
 
     for a in admins:
-        lines.append(f"• <code>{a['user_id']}</code>")
+        username_str = f" @{a['username']}" if a.get('username') else ""
+        lines.append(f"• <code>{a['user_id']}</code>{username_str}")
+        btn_label = f"❌ Удалить @{a['username']}" if a.get('username') else f"❌ Удалить {a['user_id']}"
         keyboard_rows.append([
             InlineKeyboardButton(
-                f"❌ Удалить {a['user_id']}",
+                btn_label,
                 callback_data=f"{AdminCB.REMOVE_ADMIN}{a['user_id']}"
             )
         ])
@@ -286,7 +293,7 @@ async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")]]
     await query.edit_message_text(
         "➕ <b>Добавить администратора</b>\n\n"
-        "Введите Telegram ID:",
+        "Введите @username или Telegram ID:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
@@ -294,16 +301,43 @@ async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def add_admin_receive_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен user_id — добавить админа"""
+    """Получен @username или user_id — добавить админа"""
     text = update.message.text.strip()
-
-    try:
-        new_admin_id = int(text)
-    except ValueError:
-        await update.message.reply_text("Введите числовой Telegram ID.")
-        return AdminState.INPUT_USER_FOR_ADMIN
-
     db: DatabaseService = context.bot_data["db"]
+
+    if text.startswith("@"):
+        # Ввод по username — ищем в таблице users
+        username = text.lstrip("@")
+        user = await db.get_user_by_username(username)
+        if not user:
+            await update.message.reply_text(
+                f"❌ Пользователь @{username} не найден.\n\n"
+                "Попросите его написать /start боту.",
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
+        new_admin_id = user.user_id
+    else:
+        try:
+            new_admin_id = int(text)
+        except ValueError:
+            await update.message.reply_text("Введите @username или числовой Telegram ID.")
+            return AdminState.INPUT_USER_FOR_ADMIN
+
+    # Проверка: владелец бота?
+    if new_admin_id == config.ADMIN_ID:
+        await update.message.reply_text(
+            "ℹ️ Этот пользователь — владелец бота, уже имеет полный доступ."
+        )
+        return ConversationHandler.END
+
+    # Проверка: уже админ?
+    if await db.is_admin(new_admin_id):
+        await update.message.reply_text(
+            "⚠️ Этот пользователь уже является администратором."
+        )
+        return ConversationHandler.END
+
     await db.add_admin(new_admin_id, added_by=update.effective_user.id)
 
     await update.message.reply_text(
@@ -447,6 +481,92 @@ async def receive_blacklist_chats(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 
+# ===== Управление ценами подписок =====
+
+async def manage_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать текущие цены подписок"""
+    query = update.callback_query
+    await query.answer()
+
+    service: SubscriptionService = context.bot_data["subscription"]
+    plans = await service.get_plans()
+
+    lines = ["💰 <b>Цены подписок</b>\n"]
+    keyboard = []
+    for key in ["day", "month", "quarter"]:
+        plan = plans[key]
+        price_rub = plan["price"] // 100
+        lines.append(f"• {plan['label']}: <b>{price_rub} RUB</b>")
+        keyboard.append([
+            InlineKeyboardButton(f"✏️ {plan['label']}", callback_data=f"{AdminCB.EDIT_PRICE}{key}")
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=AdminCB.MENU)])
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+
+
+async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало редактирования цены тарифа"""
+    query = update.callback_query
+    await query.answer()
+
+    plan = query.data.replace(AdminCB.EDIT_PRICE, "")
+    context.user_data["admin_edit_plan"] = plan
+
+    service: SubscriptionService = context.bot_data["subscription"]
+    plans = await service.get_plans()
+    plan_info = plans.get(plan, {})
+    current_price = plan_info.get("price", 0) // 100
+
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")]]
+    await query.edit_message_text(
+        f"✏️ <b>Изменить цену: {plan_info.get('label', plan)}</b>\n\n"
+        f"Текущая цена: <b>{current_price} RUB</b>\n\n"
+        "Введите новую цену в рублях:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return AdminState.INPUT_NEW_PRICE
+
+
+async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получена новая цена — обновить"""
+    text = update.message.text.strip()
+
+    try:
+        price_rub = int(text)
+    except ValueError:
+        await update.message.reply_text("Введите числовое значение цены в рублях.")
+        return AdminState.INPUT_NEW_PRICE
+
+    if price_rub <= 0:
+        await update.message.reply_text("Цена должна быть больше 0.")
+        return AdminState.INPUT_NEW_PRICE
+
+    plan = context.user_data.get("admin_edit_plan")
+    price_kopecks = price_rub * 100
+
+    service: SubscriptionService = context.bot_data["subscription"]
+    await service.update_plan_price(plan, price_kopecks)
+
+    plans = await service.get_plans()
+    plan_label = plans[plan]["label"]
+
+    await update.message.reply_text(
+        f"✅ Цена обновлена!\n\n"
+        f"Тариф: {plan_label}\n"
+        f"Новая цена: <b>{price_rub} RUB</b>",
+        parse_mode="HTML",
+    )
+    logger.info(f"Admin {update.effective_user.id} updated price: {plan}={price_rub} RUB")
+    return ConversationHandler.END
+
+
 def register_admin_handlers(app):
     """Регистрация обработчиков админки"""
     # Команда /admin
@@ -475,7 +595,7 @@ def register_admin_handlers(app):
         ],
         states={
             AdminState.INPUT_USER_FOR_SUB: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, grant_sub_receive_user)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, grant_sub_receive_user)
             ],
             AdminState.SELECT_PLAN: [
                 CallbackQueryHandler(grant_sub_select_plan, pattern=f"^{AdminCB.GRANT_PLAN}")
@@ -486,6 +606,7 @@ def register_admin_handlers(app):
             CommandHandler("start", cancel_admin_conv),
             MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(grant_conv)
 
@@ -496,7 +617,7 @@ def register_admin_handlers(app):
         ],
         states={
             AdminState.INPUT_USER_FOR_ADMIN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_receive_user)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, add_admin_receive_user)
             ],
         },
         fallbacks=[
@@ -504,6 +625,7 @@ def register_admin_handlers(app):
             CommandHandler("start", cancel_admin_conv),
             MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(add_admin_conv)
 
@@ -514,7 +636,7 @@ def register_admin_handlers(app):
         ],
         states={
             AdminState.INPUT_PVZ_CHATS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_pvz_chats)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_pvz_chats)
             ],
         },
         fallbacks=[
@@ -522,6 +644,7 @@ def register_admin_handlers(app):
             CommandHandler("start", cancel_admin_conv),
             MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(pvz_chats_conv)
 
@@ -532,7 +655,7 @@ def register_admin_handlers(app):
         ],
         states={
             AdminState.INPUT_BLACKLIST_CHATS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_blacklist_chats)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_blacklist_chats)
             ],
         },
         fallbacks=[
@@ -540,5 +663,28 @@ def register_admin_handlers(app):
             CommandHandler("start", cancel_admin_conv),
             MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(bl_chats_conv)
+
+    # Управление ценами подписок
+    app.add_handler(CallbackQueryHandler(manage_prices, pattern=f"^{AdminCB.MANAGE_PRICES}$"))
+
+    # ConversationHandler: редактирование цены
+    edit_price_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(edit_price_start, pattern=f"^{AdminCB.EDIT_PRICE}")
+        ],
+        states={
+            AdminState.INPUT_NEW_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_new_price)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$"),
+            CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
+        ],
+        conversation_timeout=300,
+    )
+    app.add_handler(edit_price_conv)

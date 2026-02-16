@@ -1,5 +1,5 @@
 """Обработчики черного списка"""
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -11,10 +11,9 @@ from telegram.ext import (
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
-from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI
 from parserhub.validators import Validators
-from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton
 
 
 # Состояния для ConversationHandler
@@ -27,12 +26,16 @@ class BlacklistState:
 # Callback data
 class BlacklistCB:
     BLACKLIST_MENU = "blacklist_menu"
-    CHECK_USER = "blacklist_check_user"
     MANAGE_CHATS = "blacklist_manage_chats"
     ADD_CHAT = "blacklist_add_chat"
     REMOVE_CHAT = "blacklist_remove_chat_"
     SELECT_TOPIC = "bl_topic_"
     SELECT_ALL_TOPICS = "bl_topic_all"
+
+
+# Reply-кнопки подменю
+class BlacklistBtn:
+    CHECK = "🔍 Проверить пользователя"
 
 
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,30 +48,28 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"[BLACKLIST] user.is_blacklist_authorized = {user.is_blacklist_authorized}")
 
     if not user.is_blacklist_authorized:
-        keyboard = [
-            [InlineKeyboardButton("🔑 Авторизовать аккаунт", callback_data="auth_blacklist")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = ReplyKeyboardMarkup([
+            [KeyboardButton(MenuButton.ACCOUNT)],
+            [KeyboardButton(MenuButton.BACK)],
+        ], resize_keyboard=True)
 
         text = (
             "⚫ <b>Черный список</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт черного списка."
+            "❌ Для работы необходимо авторизовать аккаунт черного списка.\n\n"
+            "Перейдите в «👤 Мой аккаунт» для авторизации."
         )
 
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+            await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         else:
-            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+            await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         return
 
-    logger.info(f"[BLACKLIST] Показываем кнопки: CHECK_USER={BlacklistCB.CHECK_USER}")
-    keyboard = [
-        [InlineKeyboardButton("🔍 Проверить пользователя", callback_data=BlacklistCB.CHECK_USER)],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(BlacklistBtn.CHECK)],
+        [KeyboardButton(MenuButton.BACK)],
+    ], resize_keyboard=True)
 
     text = (
         "⚫ <b>Черный список</b>\n\n"
@@ -79,25 +80,24 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
     else:
-        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало проверки пользователя"""
     logger.info(f"[BLACKLIST] start_check_user вызван от user {update.effective_user.id}")
-    query = update.callback_query
-    await query.answer()
 
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="blacklist_cancel")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
 
-    await query.edit_message_text(
+    await update.message.reply_text(
         "🔍 <b>Проверка в черном списке</b>\n\n"
         "Введите username для проверки:\n"
         "<code>@username</code>",
-        reply_markup=reply_markup,
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
@@ -121,10 +121,9 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return BlacklistState.WAITING_USERNAME
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
-    session_mgr: SessionManager = context.bot_data["session_manager"]
 
-    # Получить путь к blacklist сессии
-    blacklist_session_path = session_mgr.get_session_path(user_id, "blacklist")
+    # Путь к blacklist-сессии в контексте workers-service контейнера
+    blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
     try:
         result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
@@ -160,11 +159,17 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(text, parse_mode="HTML")
 
     except Exception as e:
-        error_msg = str(e).lower()
         logger.error(f"Ошибка проверки ЧС: {e}")
 
-        # Проверка на обрыв авторизации
-        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+        # Определяем: ошибка авторизации или другая?
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации blacklist для user {update.effective_user.id}")
 
             # Сбросить статус авторизации в БД
@@ -300,10 +305,9 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return BlacklistState.WAITING_ADD_CHAT
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
-    session_mgr: SessionManager = context.bot_data["session_manager"]
 
-    # Получаем путь к blacklist сессии для проверки топиков
-    blacklist_session_path = session_mgr.get_session_path(user_id, "blacklist")
+    # Путь к blacklist-сессии в контексте workers-service контейнера
+    blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
     # Показываем индикатор загрузки
     status_msg = await update.message.reply_text("🔍 Проверяю чат...")
@@ -364,11 +368,17 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return ConversationHandler.END
 
     except Exception as e:
-        error_msg = str(e).lower()
         logger.error(f"Ошибка добавления чата в ЧС: {e}")
 
-        # Проверка на обрыв авторизации
-        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+        # Определяем: ошибка авторизации или другая?
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации blacklist для user {user_id}")
 
             # Сбросить статус авторизации в БД
@@ -471,9 +481,11 @@ async def remove_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена операции"""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Операция отменена.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Операция отменена.")
+    else:
+        await update.message.reply_text("❌ Операция отменена.")
     # Очищаем user_data
     context.user_data.pop("bl_add_chat_username", None)
     context.user_data.pop("bl_add_chat_title", None)
@@ -482,25 +494,25 @@ async def cancel_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def register_blacklist_handlers(app):
     """Регистрация обработчиков черного списка"""
-    # Меню
+    # Inline callback: возврат в меню из callback_query
     app.add_handler(
         CallbackQueryHandler(show_blacklist_menu, pattern=f"^{BlacklistCB.BLACKLIST_MENU}$|^blacklist$")
     )
 
-    # ConversationHandler для проверки пользователя
+    # ConversationHandler для проверки пользователя (Reply-кнопки)
     check_user_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_check_user, pattern=f"^{BlacklistCB.CHECK_USER}$")
+            MessageHandler(filters.Regex(f"^{BlacklistBtn.CHECK}$"), start_check_user),
         ],
         states={
             BlacklistState.WAITING_USERNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_username)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_username)
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(cancel_blacklist, pattern="^blacklist_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(check_user_conv)

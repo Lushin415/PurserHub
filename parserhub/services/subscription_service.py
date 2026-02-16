@@ -1,4 +1,5 @@
 """Сервис управления подписками"""
+import json
 import aiosqlite
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,8 +8,8 @@ from loguru import logger
 
 class SubscriptionService:
 
-    PLANS = {
-        "day": {"days": 1, "price": 30000, "label": "1 день"},
+    DEFAULT_PLANS = {
+        "day": {"days": 1, "price": 10000, "label": "1 день"},
         "month": {"days": 30, "price": 50000, "label": "30 дней"},
         "quarter": {"days": 90, "price": 100000, "label": "90 дней"},
     }
@@ -31,6 +32,34 @@ class SubscriptionService:
             """)
             await db.commit()
         logger.info("Таблица subscriptions инициализирована")
+
+    async def get_plans(self) -> dict:
+        """Получить актуальные тарифы из БД (с fallback на DEFAULT_PLANS)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT value FROM global_config WHERE key = ?", ("subscription_plans",)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    try:
+                        return json.loads(row[0])
+                    except json.JSONDecodeError:
+                        logger.error("Не удалось распарсить JSON тарифов подписки")
+        return dict(self.DEFAULT_PLANS)
+
+    async def update_plan_price(self, plan: str, price: int):
+        """Обновить цену тарифа (price в копейках)"""
+        plans = await self.get_plans()
+        if plan not in plans:
+            raise ValueError(f"Unknown plan: {plan}")
+        plans[plan]["price"] = price
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO global_config (key, value) VALUES (?, ?)",
+                ("subscription_plans", json.dumps(plans, ensure_ascii=False)),
+            )
+            await db.commit()
+        logger.info(f"Обновлена цена тарифа {plan}: {price} коп.")
 
     async def has_active(self, user_id: int) -> bool:
         """Проверить есть ли активная подписка"""
@@ -59,11 +88,12 @@ class SubscriptionService:
 
     async def activate(self, user_id: int, plan: str):
         """Активировать подписку"""
-        if plan not in self.PLANS:
+        plans = await self.get_plans()
+        if plan not in plans:
             raise ValueError(f"Invalid plan: {plan}")
 
         now = datetime.utcnow()
-        days = self.PLANS[plan]["days"]
+        days = plans[plan]["days"]
 
         # Если есть активная подписка — продлить от текущей даты окончания
         existing = await self.get_info(user_id)

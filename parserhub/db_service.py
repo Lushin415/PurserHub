@@ -101,6 +101,19 @@ class DatabaseService:
                     return User(**dict(row))
                 return None
 
+    async def get_user_by_username(self, username: str) -> Optional[User]:
+        """Найти пользователя по username"""
+        username = username.lstrip("@")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return User(**dict(row))
+                return None
+
     async def create_or_update_user(
         self,
         user_id: int,
@@ -250,10 +263,14 @@ class DatabaseService:
                 return await cursor.fetchone() is not None
 
     async def get_admins(self) -> list[dict]:
-        """Получить список администраторов из БД"""
+        """Получить список администраторов из БД (с username из таблицы users)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM admins ORDER BY created_at") as cursor:
+            async with db.execute(
+                """SELECT a.*, u.username FROM admins a
+                LEFT JOIN users u ON a.user_id = u.user_id
+                ORDER BY a.created_at"""
+            ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 

@@ -29,14 +29,19 @@ class SubCB:
     BACK = "main_menu"
 
 
-def subscription_keyboard():
-    """Клавиатура выбора тарифа"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1 день — 100 RUB", callback_data=SubCB.BUY_DAY)],
-        [InlineKeyboardButton("30 дней — 500 RUB", callback_data=SubCB.BUY_MONTH)],
-        [InlineKeyboardButton("90 дней — 1000 RUB", callback_data=SubCB.BUY_QUARTER)],
-        [InlineKeyboardButton("❌ Отмена", callback_data=SubCB.BACK)],
-    ])
+async def subscription_keyboard(service: SubscriptionService):
+    """Клавиатура выбора тарифа (цены из БД)"""
+    plans = await service.get_plans()
+    buttons = []
+    for key in ["day", "month", "quarter"]:
+        plan = plans[key]
+        price_rub = plan["price"] // 100
+        buttons.append([InlineKeyboardButton(
+            f"{plan['label']} — {price_rub} RUB",
+            callback_data=f"buy_{key}"
+        )])
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=SubCB.BACK)])
+    return InlineKeyboardMarkup(buttons)
 
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,11 +78,13 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = f"💳 <b>Подписка</b>\n\n{status_text}"
 
+    keyboard = await subscription_keyboard(service)
+
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=subscription_keyboard(), parse_mode="HTML")
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     else:
-        await update.message.reply_text(text, reply_markup=subscription_keyboard(), parse_mode="HTML")
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -87,17 +94,16 @@ async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     plan = query.data.replace("buy_", "")
 
-    plans_info = {
-        "day": ("Подписка на 1 день", 10000),
-        "month": ("Подписка на 30 дней", 50000),
-        "quarter": ("Подписка на 90 дней", 100000),
-    }
+    service: SubscriptionService = context.bot_data["subscription"]
+    plans = await service.get_plans()
 
-    if plan not in plans_info:
+    if plan not in plans:
         await query.edit_message_text("❌ Неизвестный тариф.")
         return
 
-    title, price = plans_info[plan]
+    plan_info = plans[plan]
+    title = plan_info["label"]
+    price = plan_info["price"]
 
     try:
         await context.bot.send_invoice(
@@ -128,7 +134,7 @@ async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     plan = payload.replace("sub_", "")
-    if plan not in SubscriptionService.PLANS:
+    if plan not in SubscriptionService.DEFAULT_PLANS:
         await query.answer(ok=False, error_message="Ошибка: неизвестный тариф.")
         return
 
@@ -153,7 +159,8 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         db: DatabaseService = context.bot_data["db"]
         await db.log_payment(user_id, plan, payment.total_amount, payment.currency)
 
-        plan_info = SubscriptionService.PLANS.get(plan, {})
+        plans = await service.get_plans()
+        plan_info = plans.get(plan, {})
         label = plan_info.get("label", plan)
 
         keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]

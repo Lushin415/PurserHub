@@ -103,7 +103,7 @@ class WorkersAPI:
         params = {"task_id": "from_callback"}
 
         try:
-            response = await self.client.post(url, params=params, timeout=60.0)
+            response = await self.client.post(url, params=params, timeout=600.0)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as e:

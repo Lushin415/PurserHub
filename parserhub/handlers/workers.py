@@ -1,6 +1,6 @@
 """Обработчики мониторинга ПВЗ"""
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -18,7 +18,7 @@ from parserhub.models import ActiveTask, WorkersFilters
 from parserhub.validators import Validators, AntiSpam
 from parserhub.services.subscription_service import SubscriptionService
 from parserhub.handlers.admin import _is_admin
-from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton, show_main_menu
 
 
 # Состояния для ConversationHandler
@@ -32,16 +32,18 @@ class WorkersState:
     CONFIRM = 8
 
 
-# Callback data
+# Reply-кнопки подменю
+class WorkersBtn:
+    START = "🚀 Запустить мониторинг"
+    MY_TASKS = "📋 Задачи мониторинга"
+    MODE_WORKER = "👷 Работники"
+    MODE_EMPLOYER = "🏢 Работодатели"
+    CONFIRM = "✅ Запустить"
+
+
+# Callback data (только для inline-кнопок: задачи, уведомления)
 class WorkersCB:
     WORKERS_MENU = "workers_menu"
-    START_MONITORING = "start_monitoring"
-    MY_TASKS = "workers_my_tasks"
-    MODE_WORKER = "mode_worker"
-    MODE_EMPLOYER = "mode_employer"
-    SKIP_DATES = "skip_dates"
-    SKIP_PRICES = "skip_prices"
-    CONFIRM_START = "confirm_start"
     VIEW_TASK = "view_worker_task_"
     STOP_TASK = "stop_worker_task_"
     STOP_ALL_TASKS = "stop_all_worker_tasks"
@@ -56,30 +58,28 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
 
     if not user.is_parser_authorized:
-        keyboard = [
-            [InlineKeyboardButton("🔑 Авторизовать аккаунт", callback_data="auth_parser")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = ReplyKeyboardMarkup([
+            [KeyboardButton(MenuButton.ACCOUNT)],
+            [KeyboardButton(MenuButton.BACK)],
+        ], resize_keyboard=True)
 
         text = (
             "👷 <b>Мониторинг ПВЗ</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт парсера."
+            "❌ Для работы необходимо авторизовать аккаунт парсера.\n\n"
+            "Перейдите в «👤 Мой аккаунт» для авторизации."
         )
 
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+            await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         else:
-            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+            await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         return
 
-    keyboard = [
-        [InlineKeyboardButton("🚀 Запустить мониторинг", callback_data=WorkersCB.START_MONITORING)],
-        [InlineKeyboardButton("📋 Мои задачи", callback_data=WorkersCB.MY_TASKS)],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(WorkersBtn.START), KeyboardButton(WorkersBtn.MY_TASKS)],
+        [KeyboardButton(MenuButton.BACK)],
+    ], resize_keyboard=True)
 
     text = (
         "👷 <b>Мониторинг ПВЗ</b>\n\n"
@@ -89,16 +89,13 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
     else:
-        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Выбор режима: работники или работодатели"""
-    query = update.callback_query
-    await query.answer()
-
     # Проверка подписки
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
@@ -106,26 +103,23 @@ async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEF
     if not await _is_admin(user_id, db):
         sub_service: SubscriptionService = context.bot_data["subscription"]
         if not await sub_service.has_active(user_id):
-            from parserhub.handlers.subscription import subscription_keyboard
-            await query.edit_message_text(
+            await update.message.reply_text(
                 "🔒 <b>Требуется подписка</b>\n\n"
-                "Для запуска мониторинга ПВЗ необходима активная подписка.",
-                reply_markup=subscription_keyboard(),
+                "Для запуска мониторинга ПВЗ необходима активная подписка.\n"
+                "Перейдите в «💳 Подписка» для оформления.",
                 parse_mode="HTML",
             )
             return ConversationHandler.END
 
-    keyboard = [
-        [InlineKeyboardButton("👷 Работники", callback_data=WorkersCB.MODE_WORKER)],
-        [InlineKeyboardButton("🏢 Работодатели", callback_data=WorkersCB.MODE_EMPLOYER)],
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(WorkersBtn.MODE_WORKER), KeyboardButton(WorkersBtn.MODE_EMPLOYER)],
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
 
-    await query.edit_message_text(
+    await update.message.reply_text(
         "🚀 <b>Запуск мониторинга ПВЗ</b>\n\n"
         "Выберите режим:",
-        reply_markup=reply_markup,
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
@@ -134,23 +128,22 @@ async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEF
 
 async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получен режим - сразу переходим к датам (чаты берутся из глобальных настроек)"""
-    query = update.callback_query
-    await query.answer()
-
-    mode = "worker" if query.data == WorkersCB.MODE_WORKER else "employer"
+    text = update.message.text.strip()
+    mode = "worker" if text == WorkersBtn.MODE_WORKER else "employer"
     context.user_data["workers_mode"] = mode
 
     mode_name = "Работники" if mode == "worker" else "Работодатели"
 
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
 
-    await query.edit_message_text(
+    await update.message.reply_text(
         f"👷 <b>Режим: {mode_name}</b>\n\n"
         "📅 Фильтр по датам\n\n"
         "Введите дату начала (формат: YYYY-MM-DD):\n"
         "<code>2026-12-31</code>",
-        reply_markup=reply_markup,
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
@@ -169,15 +162,8 @@ async def receive_date_from(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["workers_date_from"] = date_str
 
-    # Убрали кнопку пропуска
-    keyboard = [
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "📅 Введите дату окончания (формат: YYYY-MM-DD):",
-        reply_markup=reply_markup,
     )
 
     return WorkersState.INPUT_DATE_TO
@@ -211,26 +197,13 @@ async def receive_date_to(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def ask_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Запросить фильтр по ценам"""
-    # Убрали кнопку пропуска
-    keyboard = [
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     text = (
         "💰 Фильтр по ставке\n\n"
         "Введите минимальную ставку (руб/смена):\n"
         "<code>2000</code>"
     )
 
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
+    await update.message.reply_text(text=text, parse_mode="HTML")
 
     return WorkersState.INPUT_MIN_PRICE
 
@@ -247,15 +220,8 @@ async def receive_min_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["workers_min_price"] = price
 
-    # Убрали кнопку пропуска
-    keyboard = [
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "💰 Введите максимальную ставку (руб/смена):",
-        reply_markup=reply_markup,
     )
 
     return WorkersState.INPUT_MAX_PRICE
@@ -314,11 +280,9 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     filters_str = "\n".join(filters_text) if filters_text else "Без фильтров"
 
-    keyboard = [
-        [InlineKeyboardButton("✅ Запустить", callback_data=WorkersCB.CONFIRM_START)],
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(WorkersBtn.CONFIRM), KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
 
     text = (
         "📋 <b>Подтверждение запуска</b>\n\n"
@@ -328,23 +292,15 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "Запустить мониторинг?"
     )
 
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
+    await update.message.reply_text(
+        text=text, reply_markup=keyboard, parse_mode="HTML"
+    )
 
     return WorkersState.CONFIRM
 
 
 async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Подтверждение - запуск мониторинга"""
-    query = update.callback_query
-    await query.answer()
-
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
     session_mgr: SessionManager = context.bot_data["session_manager"]
@@ -356,13 +312,14 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if running:
         task = running[0]
         service_name = "мониторинг ПВЗ" if task.service == "workers" else "парсинг недвижимости"
-        await query.edit_message_text(
+        await update.message.reply_text(
             "⚠️ <b>Нельзя запустить</b>\n\n"
             f"У вас уже запущена задача: <b>{service_name}</b>\n"
             f"Task ID: <code>{task.task_id[:8]}...</code>\n\n"
             "Остановите текущую задачу перед запуском новой.",
             parse_mode="HTML",
         )
+        await show_main_menu(update, context)
         return ConversationHandler.END
 
     # Получить пути к сессиям (в контексте workers-service контейнера)
@@ -374,7 +331,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Получить глобальные чаты из БД
     chats = await db.get_global_chats('pvz_monitoring_chats')
     if not chats:
-        await query.edit_message_text(
+        await update.message.reply_text(
             "❌ Чаты для мониторинга не настроены.\n\n"
             "Обратитесь к администратору для настройки глобальных чатов ПВЗ."
         )
@@ -421,39 +378,47 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         await db.add_task(task)
 
-        await query.edit_message_text(
+        await update.message.reply_text(
             f"✅ <b>Мониторинг ПВЗ запущен!</b>\n\n"
             f"Task ID: <code>{task_id}</code>\n\n"
             f"Уведомления о подходящих вакансиях будут приходить в этот чат от бота PurserHub.",
             parse_mode="HTML",
         )
+        await show_main_menu(update, context)
 
         logger.info(f"Мониторинг запущен: user={user_id}, task={task_id}")
 
     except Exception as e:
-        error_msg = str(e).lower()
         logger.error(f"Ошибка запуска мониторинга: {e}")
 
-        # Проверка на обрыв авторизации
-        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+        # Определяем: ошибка авторизации или другая?
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
 
-            # Сброситьстатус авторизации в БД
+            # Сбросить статус авторизации в БД
             await db.update_auth_status(user_id, "parser", False)
 
             # Очистить данные пользователя
             context.user_data.clear()
 
-            await query.edit_message_text(
+            await update.message.reply_text(
                 "⚠️ <b>Авторизация оборвана</b>\n\n"
                 "Произошла ошибка со стороны Telegram.\n"
                 "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
                 parse_mode="HTML"
             )
         else:
-            await query.edit_message_text(
+            await update.message.reply_text(
                 f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
             )
+        await show_main_menu(update, context)
 
     return ConversationHandler.END
 
@@ -469,13 +434,16 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=WorkersCB.WORKERS_MENU)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
+        text = (
             "📋 <b>Мои задачи</b>\n\n"
-            "У вас нет активных задач.",
-            reply_markup=reply_markup,
-            parse_mode="HTML",
+            "У вас нет активных задач."
         )
+
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         return
 
     keyboard = []
@@ -492,13 +460,16 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=WorkersCB.WORKERS_MENU)])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
+    text = (
         f"📋 <b>Мои задачи</b> ({len(tasks)})\n\n"
-        "Выберите задачу для просмотра:",
-        reply_markup=reply_markup,
-        parse_mode="HTML",
+        "Выберите задачу для просмотра:"
     )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -681,23 +652,27 @@ async def handle_notification_ignore(update: Update, context: ContextTypes.DEFAU
 
 async def cancel_workers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена настройки мониторинга"""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Настройка мониторинга отменена.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Настройка мониторинга отменена.")
+    else:
+        await update.message.reply_text("❌ Настройка мониторинга отменена.")
     return ConversationHandler.END
 
 
 def register_workers_handlers(app):
     """Регистрация обработчиков мониторинга ПВЗ"""
-    # Меню
+    # Inline callback: возврат в меню из списка задач
     app.add_handler(
         CallbackQueryHandler(show_workers_menu, pattern=f"^{WorkersCB.WORKERS_MENU}$|^workers$")
     )
 
-    # Список задач
-    app.add_handler(CallbackQueryHandler(show_my_tasks, pattern=f"^{WorkersCB.MY_TASKS}$"))
+    # Reply-кнопка "📋 Задачи мониторинга"
+    app.add_handler(MessageHandler(
+        filters.Regex(f"^{WorkersBtn.MY_TASKS}$"), show_my_tasks
+    ))
 
-    # Просмотр и управление задачами
+    # Inline callback: просмотр и управление задачами (остаются inline)
     app.add_handler(CallbackQueryHandler(view_task, pattern=f"^{WorkersCB.VIEW_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_task, pattern=f"^{WorkersCB.STOP_TASK}"))
     app.add_handler(CallbackQueryHandler(force_close_task, pattern=f"^{WorkersCB.FORCE_CLOSE_TASK}"))
@@ -707,39 +682,38 @@ def register_workers_handlers(app):
     app.add_handler(CallbackQueryHandler(handle_notification_blacklist_check, pattern=r"^check_blacklist:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_notification_ignore, pattern=r"^ignore:\d+$"))
 
-    # ConversationHandler для запуска мониторинга
+    # ConversationHandler для запуска мониторинга (Reply-кнопки)
     monitoring_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_monitoring_select_mode, pattern=f"^{WorkersCB.START_MONITORING}$")
+            MessageHandler(filters.Regex(f"^{WorkersBtn.START}$"), start_monitoring_select_mode),
         ],
         states={
             WorkersState.SELECT_MODE: [
-                CallbackQueryHandler(receive_mode, pattern=f"^{WorkersCB.MODE_WORKER}$|^{WorkersCB.MODE_EMPLOYER}$")
+                MessageHandler(
+                    filters.Regex(f"^({WorkersBtn.MODE_WORKER}|{WorkersBtn.MODE_EMPLOYER})$"),
+                    receive_mode
+                ),
             ],
             WorkersState.INPUT_DATE_FROM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_date_from),
-                # Удален handler skip_dates
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_date_from),
             ],
             WorkersState.INPUT_DATE_TO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_date_to),
-                # Удален handler skip_dates
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_date_to),
             ],
             WorkersState.INPUT_MIN_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_min_price),
-                # Удален handler skip_prices
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_min_price),
             ],
             WorkersState.INPUT_MAX_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_max_price),
-                # Удален handler skip_prices
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_max_price),
             ],
             WorkersState.CONFIRM: [
-                CallbackQueryHandler(confirm_start, pattern=f"^{WorkersCB.CONFIRM_START}$")
+                MessageHandler(filters.Regex(f"^{WorkersBtn.CONFIRM}$"), confirm_start),
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(cancel_workers, pattern="^workers_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(monitoring_conv)

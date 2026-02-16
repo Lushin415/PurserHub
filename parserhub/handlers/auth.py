@@ -349,13 +349,13 @@ def register_auth_handlers(app):
         ],
         states={
             AuthState.WAITING_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_phone)
             ],
             AuthState.WAITING_CODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_code)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_code)
             ],
             AuthState.WAITING_2FA: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_2fa)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_2fa)
             ],
         },
         fallbacks=[
@@ -363,6 +363,7 @@ def register_auth_handlers(app):
             CommandHandler("start", cancel_and_return_to_menu),
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
+        conversation_timeout=300,
     )
     app.add_handler(auth_conv)
 
