@@ -10,6 +10,7 @@ services:
       dockerfile: Dockerfile
     container_name: parserhub
     restart: unless-stopped
+    stop_grace_period: 30s  # Время на graceful shutdown
     volumes:
       # Исходный код (для разработки — не нужен rebuild)
       - ./parserhub:/app/parserhub
@@ -45,6 +46,7 @@ services:
       dockerfile: Dockerfile
     container_name: workers-service
     restart: unless-stopped
+    stop_grace_period: 30s  # Время на graceful shutdown (остановка задач + обновление БД)
     ports:
       - "8002:8002"
     volumes:
@@ -82,6 +84,7 @@ services:
       dockerfile: Dockerfile
     container_name: realty-monitor
     restart: unless-stopped
+    stop_grace_period: 30s  # Время на graceful shutdown (остановка мониторов + обновление БД)
     ports:
       - "8009:8009"
     volumes:
