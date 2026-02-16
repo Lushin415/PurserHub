@@ -18,13 +18,12 @@ from parserhub.models import ActiveTask, WorkersFilters
 from parserhub.validators import Validators, AntiSpam
 from parserhub.services.subscription_service import SubscriptionService
 from parserhub.handlers.admin import _is_admin
-from parserhub.handlers.start import cancel_and_return_to_menu
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
 
 
 # Состояния для ConversationHandler
 class WorkersState:
     SELECT_MODE = 1
-    INPUT_CHATS = 2
     INPUT_DATE_FROM = 3
     INPUT_DATE_TO = 4
     INPUT_MIN_PRICE = 5
@@ -63,13 +62,16 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
+        text = (
             "👷 <b>Мониторинг ПВЗ</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт парсера.",
-            reply_markup=reply_markup,
-            parse_mode="HTML",
+            "❌ Для работы необходимо авторизовать аккаунт парсера."
         )
+
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         return
 
     keyboard = [
@@ -85,16 +87,33 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите действие:"
     )
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=text, reply_markup=reply_markup, parse_mode="HTML"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Выбор режима: работники или работодатели"""
     query = update.callback_query
     await query.answer()
+
+    # Проверка подписки
+    user_id = update.effective_user.id
+    db: DatabaseService = context.bot_data["db"]
+
+    if not await _is_admin(user_id, db):
+        sub_service: SubscriptionService = context.bot_data["subscription"]
+        if not await sub_service.has_active(user_id):
+            from parserhub.handlers.subscription import subscription_keyboard
+            await query.edit_message_text(
+                "🔒 <b>Требуется подписка</b>\n\n"
+                "Для запуска мониторинга ПВЗ необходима активная подписка.",
+                reply_markup=subscription_keyboard(),
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
 
     keyboard = [
         [InlineKeyboardButton("👷 Работники", callback_data=WorkersCB.MODE_WORKER)],
@@ -114,7 +133,7 @@ async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEF
 
 
 async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен режим - запрашиваем чаты"""
+    """Получен режим - сразу переходим к датам (чаты берутся из глобальных настроек)"""
     query = update.callback_query
     await query.answer()
 
@@ -128,40 +147,6 @@ async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     await query.edit_message_text(
         f"👷 <b>Режим: {mode_name}</b>\n\n"
-        "Введите чаты для мониторинга (по одному в строке):\n\n"
-        "<code>@pvz_zamena\n@pvz_jobs\n@pvz_work</code>",
-        reply_markup=reply_markup,
-        parse_mode="HTML",
-    )
-
-    return WorkersState.INPUT_CHATS
-
-
-async def receive_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получены чаты - запрашиваем даты"""
-    chats_text = update.message.text.strip()
-    chats = [line.strip() for line in chats_text.split("\n") if line.strip()]
-
-    # Валидация списка чатов
-    valid, normalized_chats, error = Validators.validate_chats_list(chats)
-    if not valid:
-        await update.message.reply_text(
-            f"{error}\n\n"
-            "Попробуйте ещё раз. Формат:\n"
-            "<code>@pvz_zamena\n@pvz_jobs</code>",
-            parse_mode="HTML"
-        )
-        return WorkersState.INPUT_CHATS
-
-    context.user_data["workers_chats"] = normalized_chats
-
-    # Убрали кнопку пропуска
-    keyboard = [
-        [InlineKeyboardButton("❌ Отмена", callback_data="workers_cancel")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
         "📅 Фильтр по датам\n\n"
         "Введите дату начала (формат: YYYY-MM-DD):\n"
         "<code>2026-12-31</code>",
@@ -233,8 +218,8 @@ async def ask_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
-        "💰 Фильтр по цене\n\n"
-        "Введите минимальную цену:\n"
+        "💰 Фильтр по ставке\n\n"
+        "Введите минимальную ставку (руб/смена):\n"
         "<code>2000</code>"
     )
 
@@ -269,7 +254,7 @@ async def receive_min_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "💰 Введите максимальную цену:",
+        "💰 Введите максимальную ставку (руб/смена):",
         reply_markup=reply_markup,
     )
 
@@ -308,14 +293,17 @@ async def receive_max_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Показать подтверждение запуска"""
     mode = context.user_data.get("workers_mode")
-    chats = context.user_data.get("workers_chats", [])
     date_from = context.user_data.get("workers_date_from")
     date_to = context.user_data.get("workers_date_to")
     min_price = context.user_data.get("workers_min_price")
     max_price = context.user_data.get("workers_max_price")
 
+    # Чаты берутся из глобальных настроек (задаются администратором)
+    db: DatabaseService = context.bot_data["db"]
+    chats = await db.get_global_chats('pvz_monitoring_chats')
+
     mode_name = "Работники" if mode == "worker" else "Работодатели"
-    chats_str = "\n".join([f"• {chat}" for chat in chats])
+    chats_str = "\n".join([f"• {chat}" for chat in chats]) if chats else "Настраиваются администратором"
 
     filters_text = []
     if date_from and date_to:
@@ -362,35 +350,38 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     session_mgr: SessionManager = context.bot_data["session_manager"]
     workers_api: WorkersAPI = context.bot_data["workers_api"]
 
-    # Проверка подписки (временно отключена)
-    # if not await _is_admin(user_id, db):
-    #     sub_service: SubscriptionService = context.bot_data["subscription"]
-    #     if not await sub_service.has_active(user_id):
-    #         from parserhub.handlers.subscription import subscription_keyboard
-    #         await query.edit_message_text(
-    #             "🔒 Для запуска мониторинга необходима активная подписка.",
-    #             reply_markup=subscription_keyboard(),
-    #             parse_mode="HTML",
-    #         )
-    #         return ConversationHandler.END
-
-    # Получить настройки
-    settings = await db.get_settings(user_id)
-
-    if not settings.workers_chat_id:
+    # Проверка: у пользователя уже есть запущенная задача?
+    all_tasks = await db.get_user_tasks(user_id)
+    running = [t for t in all_tasks if t.status == "running"]
+    if running:
+        task = running[0]
+        service_name = "мониторинг ПВЗ" if task.service == "workers" else "парсинг недвижимости"
         await query.edit_message_text(
-            "❌ Не настроен Chat ID для уведомлений.\n\n"
-            "Перейдите в Настройки → Уведомления о ПВЗ и укажите Chat ID."
+            "⚠️ <b>Нельзя запустить</b>\n\n"
+            f"У вас уже запущена задача: <b>{service_name}</b>\n"
+            f"Task ID: <code>{task.task_id[:8]}...</code>\n\n"
+            "Остановите текущую задачу перед запуском новой.",
+            parse_mode="HTML",
         )
         return ConversationHandler.END
 
-    # Получить пути к сессиям
-    session_path = session_mgr.get_session_path(user_id, "parser")
-    blacklist_session_path = session_mgr.get_session_path(user_id, "blacklist")
+    # Получить пути к сессиям (в контексте workers-service контейнера)
+    # PurserHub: shared_sessions -> /app/data/sessions
+    # Workers:   shared_sessions -> /app/sessions
+    session_path = f"/app/sessions/{user_id}_parser"
+    blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
+
+    # Получить глобальные чаты из БД
+    chats = await db.get_global_chats('pvz_monitoring_chats')
+    if not chats:
+        await query.edit_message_text(
+            "❌ Чаты для мониторинга не настроены.\n\n"
+            "Обратитесь к администратору для настройки глобальных чатов ПВЗ."
+        )
+        return ConversationHandler.END
 
     # Подготовить параметры
     mode = context.user_data.get("workers_mode")
-    chats = context.user_data.get("workers_chats", [])
     date_from = context.user_data.get("workers_date_from")
     date_to = context.user_data.get("workers_date_to")
     min_price = context.user_data.get("workers_min_price")
@@ -405,7 +396,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     }
 
     try:
-        # Запустить мониторинг
+        # Запустить мониторинг (уведомления через основной PurserHub бот)
         result = await workers_api.start_monitoring(
             user_id=user_id,
             mode=mode,
@@ -413,7 +404,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             filters=filters,
             session_path=session_path,
             blacklist_session_path=blacklist_session_path,
-            notification_chat_id=settings.workers_chat_id,
+            notification_chat_id=user_id,
             parse_history_days=3,
         )
 
@@ -431,19 +422,38 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await db.add_task(task)
 
         await query.edit_message_text(
-            f"✅ <b>Мониторинг запущен!</b>\n\n"
+            f"✅ <b>Мониторинг ПВЗ запущен!</b>\n\n"
             f"Task ID: <code>{task_id}</code>\n\n"
-            f"Уведомления будут приходить в ваш чат.",
+            f"Уведомления о подходящих вакансиях будут приходить в этот чат от бота PurserHub.",
             parse_mode="HTML",
         )
 
         logger.info(f"Мониторинг запущен: user={user_id}, task={task_id}")
 
     except Exception as e:
+        error_msg = str(e).lower()
         logger.error(f"Ошибка запуска мониторинга: {e}")
-        await query.edit_message_text(
-            f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
-        )
+
+        # Проверка на обрыв авторизации
+        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+            logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
+
+            # Сброситьстатус авторизации в БД
+            await db.update_auth_status(user_id, "parser", False)
+
+            # Очистить данные пользователя
+            context.user_data.clear()
+
+            await query.edit_message_text(
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
+            )
 
     return ConversationHandler.END
 
@@ -618,6 +628,57 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_my_tasks(update, context)
 
 
+async def handle_notification_blacklist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопки 'Проверить в ЧС' из уведомления workers-service"""
+    query = update.callback_query
+    await query.answer("Поиск в черном списке...")
+
+    try:
+        item_id = int(query.data.split(":")[1])
+        workers_api: WorkersAPI = context.bot_data["workers_api"]
+
+        search_msg = await query.message.reply_text("🔍 Поиск в черном списке...")
+
+        result = await workers_api.check_blacklist_by_item(item_id)
+
+        await search_msg.delete()
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        check_result = result.get("result", {})
+        if check_result.get("found"):
+            parts = ["⚠️ НАЙДЕН В ЧЕРНОМ СПИСКЕ!", ""]
+            extracted = check_result.get("extracted_info", {})
+            if check_result.get("chat"):
+                parts.append(f"💬 Чат: {check_result['chat']}")
+            if extracted.get("full_name"):
+                parts.append(f"📝 ФИО: {extracted['full_name']}")
+            if extracted.get("username"):
+                parts.append(f"🔗 Ник: {extracted['username']}")
+            if extracted.get("phone"):
+                parts.append(f"📞 Тел: {extracted['phone']}")
+            parts.append("")
+            parts.append("🔗 Сообщение в ЧС:")
+            parts.append(check_result.get("message_link", ""))
+            await query.message.reply_text("\n".join(parts), disable_web_page_preview=False)
+        else:
+            await query.message.reply_text("✅ В черном списке НЕ найден")
+
+    except Exception as e:
+        logger.error(f"Ошибка проверки ЧС из уведомления: {e}")
+        await query.message.reply_text(f"❌ Ошибка проверки: {e}")
+
+
+async def handle_notification_ignore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопки 'Игнорировать' из уведомления workers-service"""
+    query = update.callback_query
+    await query.answer("Объявление проигнорировано")
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.error(f"Ошибка обработки ignore: {e}")
+
+
 async def cancel_workers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена настройки мониторинга"""
     query = update.callback_query
@@ -642,6 +703,10 @@ def register_workers_handlers(app):
     app.add_handler(CallbackQueryHandler(force_close_task, pattern=f"^{WorkersCB.FORCE_CLOSE_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_all_tasks, pattern=f"^{WorkersCB.STOP_ALL_TASKS}$"))
 
+    # Обработка callback-кнопок из уведомлений workers-service
+    app.add_handler(CallbackQueryHandler(handle_notification_blacklist_check, pattern=r"^check_blacklist:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_notification_ignore, pattern=r"^ignore:\d+$"))
+
     # ConversationHandler для запуска мониторинга
     monitoring_conv = ConversationHandler(
         entry_points=[
@@ -650,9 +715,6 @@ def register_workers_handlers(app):
         states={
             WorkersState.SELECT_MODE: [
                 CallbackQueryHandler(receive_mode, pattern=f"^{WorkersCB.MODE_WORKER}$|^{WorkersCB.MODE_EMPLOYER}$")
-            ],
-            WorkersState.INPUT_CHATS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_chats)
             ],
             WorkersState.INPUT_DATE_FROM: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_date_from),
@@ -677,7 +739,7 @@ def register_workers_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_workers, pattern="^workers_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
+            MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
     )
     app.add_handler(monitoring_conv)

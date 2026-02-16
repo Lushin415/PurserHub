@@ -41,9 +41,6 @@ def subscription_keyboard():
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Меню подписки — показывает статус и тарифы"""
-    query = update.callback_query
-    await query.answer()
-
     user_id = update.effective_user.id
     service: SubscriptionService = context.bot_data["subscription"]
 
@@ -74,11 +71,13 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Выберите тариф для активации:"
         )
 
-    await query.edit_message_text(
-        f"💳 <b>Подписка</b>\n\n{status_text}",
-        reply_markup=subscription_keyboard(),
-        parse_mode="HTML",
-    )
+    text = f"💳 <b>Подписка</b>\n\n{status_text}"
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, reply_markup=subscription_keyboard(), parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, reply_markup=subscription_keyboard(), parse_mode="HTML")
 
 
 async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):

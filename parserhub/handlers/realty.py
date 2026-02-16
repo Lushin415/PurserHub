@@ -17,15 +17,15 @@ from parserhub.models import ActiveTask
 from parserhub.validators import Validators, AntiSpam
 from parserhub.services.subscription_service import SubscriptionService
 from parserhub.handlers.admin import _is_admin
-from parserhub.handlers.start import cancel_and_return_to_menu
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
+from parserhub import config
 
 
 # Состояния для ConversationHandler
 class RealtyState:
     SELECT_SOURCE = 1
     INPUT_URL = 2
-    INPUT_PAGES = 3
-    CONFIRM = 4
+    CONFIRM = 3
 
 
 # Callback data
@@ -58,16 +58,33 @@ async def show_realty_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите источник для парсинга:"
     )
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=text, reply_markup=reply_markup, parse_mode="HTML"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def start_parsing_select_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Выбор источника парсинга"""
     query = update.callback_query
     await query.answer()
+
+    # Проверка подписки
+    user_id = update.effective_user.id
+    db: DatabaseService = context.bot_data["db"]
+
+    if not await _is_admin(user_id, db):
+        sub_service: SubscriptionService = context.bot_data["subscription"]
+        if not await sub_service.has_active(user_id):
+            from parserhub.handlers.subscription import subscription_keyboard
+            await query.edit_message_text(
+                "🔒 <b>Требуется подписка</b>\n\n"
+                "Для запуска парсинга недвижимости необходима активная подписка.",
+                reply_markup=subscription_keyboard(),
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
 
     if query.data == RealtyCB.START_AVITO:
         context.user_data["realty_source"] = "avito"
@@ -85,12 +102,14 @@ async def start_parsing_select_source(update: Update, context: ContextTypes.DEFA
     if context.user_data["realty_source"] == "both":
         text = (
             f"🏠 <b>Парсинг: {source_name}</b>\n\n"
+            "⚠️ <b>ОБЯЗАТЕЛЬНО УСТАНОВИТЕ СОРТИРОВКУ ПО ДАТЕ</b>\n\n"
             "Введите ссылку на Avito:\n"
             "<code>https://www.avito.ru/moskva/...</code>"
         )
     else:
         text = (
             f"🏠 <b>Парсинг: {source_name}</b>\n\n"
+            "⚠️ <b>ОБЯЗАТЕЛЬНО УСТАНОВИТЕ СОРТИРОВКУ ПО ДАТЕ</b>\n\n"
             "Введите ссылку для парсинга:\n"
             f"<code>https://{source_name.lower()}.ru/...</code>"
         )
@@ -114,7 +133,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await update.message.reply_text(error)
             return RealtyState.INPUT_URL
         context.user_data["realty_avito_url"] = url
-        return await ask_pages(update, context)
+        return await show_confirmation(update, context)
 
     # Валидация URL для Cian
     if source == "cian":
@@ -123,7 +142,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await update.message.reply_text(error)
             return RealtyState.INPUT_URL
         context.user_data["realty_cian_url"] = url
-        return await ask_pages(update, context)
+        return await show_confirmation(update, context)
 
     # Обе ссылки (both)
     if source == "both":
@@ -153,8 +172,8 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 await update.message.reply_text(error)
                 return RealtyState.INPUT_URL
             context.user_data["realty_cian_url"] = url
-            # Переходим к запросу страниц
-            return await ask_pages(update, context)
+            # Переходим к подтверждению
+            return await show_confirmation(update, context)
         else:
             await update.message.reply_text(
                 "❌ Неверная ссылка. Должна быть с доменов: avito.ru, cian.ru"
@@ -162,50 +181,11 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return RealtyState.INPUT_URL
 
 
-async def ask_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Запросить количество страниц"""
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="realty_cancel")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    text = (
-        "📄 Количество страниц\n\n"
-        "Введите количество страниц для парсинга (1-100):\n"
-        "<code>3</code>"
-    )
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-
-    return RealtyState.INPUT_PAGES
-
-
-async def receive_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получено количество страниц - показываем подтверждение"""
-    pages_str = update.message.text.strip()
-
-    # Валидация количества страниц
-    valid, pages, error = Validators.validate_pages_count(pages_str)
-    if not valid:
-        await update.message.reply_text(error)
-        return RealtyState.INPUT_PAGES
-
-    context.user_data["realty_pages"] = pages
-
-    return await show_confirmation(update, context)
-
-
 async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показать подтверждение запуска"""
+    """Показать подтверждение запуска мониторинга"""
     source = context.user_data.get("realty_source")
     avito_url = context.user_data.get("realty_avito_url")
     cian_url = context.user_data.get("realty_cian_url")
-    pages = context.user_data.get("realty_pages")
 
     urls_text = []
     if avito_url:
@@ -222,10 +202,9 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
-        "📋 <b>Подтверждение запуска</b>\n\n"
+        "📋 <b>Подтверждение запуска мониторинга</b>\n\n"
         f"<b>Ссылки:</b>\n{urls_str}\n\n"
-        f"<b>Страниц:</b> {pages}\n\n"
-        "Запустить парсинг?"
+        "Запустить мониторинг?"
     )
 
     if update.callback_query:
@@ -249,42 +228,33 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     db: DatabaseService = context.bot_data["db"]
     realty_api: RealtyAPI = context.bot_data["realty_api"]
 
-    # Проверка подписки (временно отключена)
-    # if not await _is_admin(user_id, db):
-    #     sub_service: SubscriptionService = context.bot_data["subscription"]
-    #     if not await sub_service.has_active(user_id):
-    #         from parserhub.handlers.subscription import subscription_keyboard
-    #         await query.edit_message_text(
-    #             "🔒 Для запуска парсинга необходима активная подписка.",
-    #             reply_markup=subscription_keyboard(),
-    #             parse_mode="HTML",
-    #         )
-    #         return ConversationHandler.END
-
-    # Получить настройки
-    settings = await db.get_settings(user_id)
-
-    if not settings.realty_bot_token or not settings.realty_chat_id:
+    # Проверка: у пользователя уже есть запущенная задача?
+    all_tasks = await db.get_user_tasks(user_id)
+    running = [t for t in all_tasks if t.status == "running"]
+    if running:
+        task = running[0]
+        service_name = "мониторинг ПВЗ" if task.service == "workers" else "парсинг недвижимости"
         await query.edit_message_text(
-            "❌ Не настроены уведомления.\n\n"
-            "Перейдите в Настройки → Бот для недвижимости и укажите токен бота и Chat ID."
+            "⚠️ <b>Нельзя запустить</b>\n\n"
+            f"У вас уже запущена задача: <b>{service_name}</b>\n"
+            f"Task ID: <code>{task.task_id[:8]}...</code>\n\n"
+            "Остановите текущую задачу перед запуском новой.",
+            parse_mode="HTML",
         )
         return ConversationHandler.END
 
     # Получить параметры
     avito_url = context.user_data.get("realty_avito_url")
     cian_url = context.user_data.get("realty_cian_url")
-    pages = context.user_data.get("realty_pages", 3)
 
     try:
-        # Запустить парсинг
+        # Запустить мониторинг (уведомления через основной PurserHub бот)
         result = await realty_api.start_parsing(
             user_id=user_id,
-            notification_bot_token=settings.realty_bot_token,
-            notification_chat_id=settings.realty_chat_id,
             avito_url=avito_url,
             cian_url=cian_url,
-            pages=pages,
+            notification_bot_token=config.BOT_TOKEN,
+            notification_chat_id=user_id,
         )
 
         task_id = result["task_id"]
@@ -309,19 +279,35 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await db.add_task(task)
 
         await query.edit_message_text(
-            f"✅ <b>Парсинг запущен!</b>\n\n"
+            f"✅ <b>Мониторинг недвижимости запущен!</b>\n\n"
             f"Task ID: <code>{task_id}</code>\n\n"
-            f"Уведомления будут приходить в ваш чат.",
+            f"Уведомления о новых объявлениях будут приходить в этот чат от бота PurserHub.",
             parse_mode="HTML",
         )
 
         logger.info(f"Парсинг запущен: user={user_id}, task={task_id}, type={task_type}")
 
     except Exception as e:
+        error_msg = str(e).lower()
         logger.error(f"Ошибка запуска парсинга: {e}")
-        await query.edit_message_text(
-            f"❌ Ошибка запуска парсинга:\n\n{str(e)}"
-        )
+
+        # Проверка на обрыв авторизации (хотя в realty обычно не используется сессия)
+        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+            logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
+
+            # Очистить данные пользователя
+            context.user_data.clear()
+
+            await query.edit_message_text(
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Ошибка запуска парсинга:\n\n{str(e)}"
+            )
 
     return ConversationHandler.END
 
@@ -385,12 +371,7 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         status = await realty_api.get_status(task_id)
-
-        progress = status.get("progress", {})
-        total_pages = progress.get("total_pages", 0)
-        current_page = progress.get("current_page", 0)
-        found_ads = progress.get("found_ads", 0)
-        filtered_ads = progress.get("filtered_ads", 0)
+        task_status = status.get("status", "unknown")
 
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить", callback_data=f"{RealtyCB.VIEW_TASK}{task_id}")],
@@ -399,18 +380,45 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.answer()
-        await query.edit_message_text(
-            f"📊 <b>Статус парсинга</b>\n\n"
-            f"<b>Task ID:</b> <code>{task_id}</code>\n"
-            f"<b>Статус:</b> {status['status']}\n\n"
-            f"<b>Прогресс:</b>\n"
-            f"• Страниц: {current_page}/{total_pages}\n"
-            f"• Найдено объявлений: {found_ads}\n"
-            f"• Отфильтровано: {filtered_ads}",
-            reply_markup=reply_markup,
-            parse_mode="HTML",
-        )
+        # Проверка на режим мониторинга
+        if task_status == "monitoring":
+            progress = status.get("progress", {})
+            found_ads = progress.get("found_ads", 0)
+            filtered_ads = progress.get("filtered_ads", 0)
+            last_check = progress.get("last_check", "Не выполнялась")
+
+            await query.answer()
+            await query.edit_message_text(
+                f"📡 <b>Статус мониторинга</b>\n\n"
+                f"<b>Task ID:</b> <code>{task_id}</code>\n"
+                f"<b>Статус:</b> Активный мониторинг\n\n"
+                f"<b>Статистика:</b>\n"
+                f"• Найдено объявлений: {found_ads}\n"
+                f"• Отфильтровано: {filtered_ads}\n"
+                f"• Последняя проверка: {last_check}",
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        else:
+            # Обычный режим парсинга
+            progress = status.get("progress", {})
+            total_pages = progress.get("total_pages", 0)
+            current_page = progress.get("current_page", 0)
+            found_ads = progress.get("found_ads", 0)
+            filtered_ads = progress.get("filtered_ads", 0)
+
+            await query.answer()
+            await query.edit_message_text(
+                f"📊 <b>Статус парсинга</b>\n\n"
+                f"<b>Task ID:</b> <code>{task_id}</code>\n"
+                f"<b>Статус:</b> {task_status}\n\n"
+                f"<b>Прогресс:</b>\n"
+                f"• Страниц: {current_page}/{total_pages}\n"
+                f"• Найдено объявлений: {found_ads}\n"
+                f"• Отфильтровано: {filtered_ads}",
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
 
     except Exception as e:
         logger.error(f"Ошибка получения статуса парсинга {task_id}: {e}")
@@ -533,9 +541,6 @@ def register_realty_handlers(app):
             RealtyState.INPUT_URL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url)
             ],
-            RealtyState.INPUT_PAGES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_pages)
-            ],
             RealtyState.CONFIRM: [
                 CallbackQueryHandler(confirm_start, pattern=f"^{RealtyCB.CONFIRM_START}$")
             ],
@@ -543,7 +548,7 @@ def register_realty_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_realty, pattern="^realty_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
+            MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
     )
     app.add_handler(parsing_conv)

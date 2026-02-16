@@ -1,97 +1,122 @@
 version: '3.8'
 
-# Общий volume для сессий Pyrogram
+services:
+  # ========================================
+  # PurserHub - Главный бот-оркестратор
+  # ========================================
+  parserhub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: parserhub
+    restart: unless-stopped
+    volumes:
+      # Исходный код (для разработки — не нужен rebuild)
+      - ./parserhub:/app/parserhub
+      # База данных
+      - ./data:/app/data
+      # Shared сессии Telegram (общие для всех сервисов)
+      - shared_sessions:/app/data/sessions
+      # Логи
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Moscow
+      - WORKERS_SERVICE_URL=http://workers-service:8002
+      - REALTY_SERVICE_URL=http://realty-monitor:8009
+      - SESSIONS_DIR=/app/data/sessions
+      - DB_PATH=/app/data/bot.db
+      - LOG_PATH=/app/logs/bot.log
+    depends_on:
+      workers-service:
+        condition: service_healthy
+      realty-monitor:
+        condition: service_healthy
+    networks:
+      - parserhub_network
+
+  # ========================================
+  # Workers Service - Мониторинг ПВЗ
+  # ========================================
+  workers-service:
+    build:
+      context: ../workers_service
+      dockerfile: Dockerfile
+    container_name: workers-service
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      # Shared сессии Telegram
+      - shared_sessions:/app/sessions
+      # База данных
+      - ../workers_service/data/db:/app/db
+      # Логи
+      - ../workers_service/data/logs:/app/logs
+    env_file:
+      - ../workers_service/.env
+    environment:
+      - TZ=Europe/Moscow
+      - DB_PATH=/app/db/workers.db
+      - SESSION_PATH=/app/sessions
+      - LOG_PATH=/app/logs/workers_service.log
+      - HOST=0.0.0.0
+      - PORT=8002
+      - BOT_TOKEN=${BOT_TOKEN}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - parserhub_network
+
+  # ========================================
+  # Realty Monitor - Парсинг недвижимости
+  # ========================================
+  realty-monitor:
+    build:
+      context: ../parser_avito_cian
+      dockerfile: Dockerfile
+    container_name: realty-monitor
+    restart: unless-stopped
+    ports:
+      - "8009:8009"
+    volumes:
+      # Конфиг (read-only)
+      - ../parser_avito_cian/config.toml:/app/config.toml:ro
+      # База данных
+      - ../parser_avito_cian/database.db:/app/database.db
+      # Cookies
+      - ../parser_avito_cian/cookies.json:/app/cookies.json
+      - ../parser_avito_cian/cookies_cian.json:/app/cookies_cian.json
+      # Логи
+      - ../parser_avito_cian/logs:/app/logs
+      # Результаты (опционально)
+      - ../parser_avito_cian/result:/app/result
+    environment:
+      - TZ=Europe/Moscow
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - parserhub_network
+
+# ========================================
+# Volumes
+# ========================================
 volumes:
   shared_sessions:
     driver: local
 
-# Сеть для связи между контейнерами
+# ========================================
+# Networks
+# ========================================
 networks:
   parserhub_network:
     driver: bridge
-
-services:
-  # ===== 1. Парсер недвижимости Avito/Cian =====
-  avito_cian_parser:
-    build:
-      context: ../parser_avito_cian # Путь к вашему проекту avito_cian_parser
-      dockerfile: Dockerfile
-    container_name: parser_avito_cian
-    ports:
-      - "8001:8001"  # Доступен снаружи на порту 8001
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8001
-    restart: unless-stopped
-    networks:
-      - parserhub_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ===== 2. Сервис мониторинга ПВЗ =====
-  workers_service:
-    build:
-      context: ../workers_service  # Путь к вашему проекту workers_service
-      dockerfile: Dockerfile
-    container_name: workers_service
-    ports:
-      - "8002:8002"  # Доступен снаружи на порту 8002
-    volumes:
-      - shared_sessions:/shared/sessions  # Общий volume для сессий
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8002
-      - SESSIONS_DIR=/shared/sessions  # Путь к сессиям внутри контейнера
-    env_file:
-      - ../workers_service/.env  # Берём BOT_TOKEN, API_ID, API_HASH из .env
-    restart: unless-stopped
-    networks:
-      - parserhub_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ===== 3. ParserHub - Главный оркестровый бот =====
-  parserhub:
-    build:
-      context: .  # Текущая директория (PurserHub)
-      dockerfile: Dockerfile
-    container_name: parserhub_bot
-    ports:
-      - "8003:8003"  # На случай если понадобится HTTP API
-    volumes:
-      - shared_sessions:/shared/sessions  # Общий volume для сессий
-      - ./data:/app/data  # Локальная директория для БД и логов
-    environment:
-      # Пути внутри контейнера
-      - SESSIONS_DIR=/shared/sessions
-      - DB_PATH=/app/data/parserhub.db
-      - LOG_PATH=/app/data/parserhub.log
-
-      # URL микросервисов (по именам контейнеров!)
-      - WORKERS_SERVICE_URL=http://workers_service:8002
-      - REALTY_SERVICE_URL=http://avito_cian_parser:8001
-
-      # Токен бота и API (будут взяты из .env или заданы здесь)
-      # BOT_TOKEN=${BOT_TOKEN}
-      # API_ID=${API_ID}
-      # API_HASH=${API_HASH}
-    env_file:
-      - .env  # Берём BOT_TOKEN, API_ID, API_HASH из .env
-    depends_on:
-      - workers_service
-      - avito_cian_parser
-    restart: unless-stopped
-    networks:
-      - parserhub_network
-
-# ===== ВАЖНО! =====
-# 1. Все контейнеры в одной сети parserhub_network
-# 2. shared_sessions volume подключен к workers_service и parserhub
-# 3. ParserHub использует имена контейнеров: workers_service, avito_cian_parser
-# 4. Порты 8001, 8002, 8003 доступны на хосте для отладки

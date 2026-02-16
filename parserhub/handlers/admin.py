@@ -14,6 +14,7 @@ from loguru import logger
 from parserhub.config import config
 from parserhub.db_service import DatabaseService
 from parserhub.services.subscription_service import SubscriptionService
+from parserhub.handlers.start import MAIN_MENU_FILTER
 
 
 class AdminCB:
@@ -25,6 +26,8 @@ class AdminCB:
     ADMINS_LIST = "admin_list"
     ADD_ADMIN = "admin_add"
     REMOVE_ADMIN = "admin_rm_"  # + user_id
+    PVZ_CHATS = "admin_pvz_chats"  # Управление чатами ПВЗ
+    BLACKLIST_CHATS = "admin_bl_chats"  # Управление чатами ЧС
     CLOSE = "admin_close"
 
 
@@ -32,6 +35,8 @@ class AdminState:
     INPUT_USER_FOR_SUB = 1
     SELECT_PLAN = 2
     INPUT_USER_FOR_ADMIN = 3
+    INPUT_PVZ_CHATS = 4
+    INPUT_BLACKLIST_CHATS = 5
 
 
 async def _is_admin(user_id: int, db: DatabaseService) -> bool:
@@ -74,6 +79,8 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎁 Выдать подписку", callback_data=AdminCB.GRANT_SUB)],
         [InlineKeyboardButton("💰 Доходы", callback_data=AdminCB.REVENUE)],
         [InlineKeyboardButton("👥 Администраторы", callback_data=AdminCB.ADMINS_LIST)],
+        [InlineKeyboardButton("📝 Чаты ПВЗ", callback_data=AdminCB.PVZ_CHATS)],
+        [InlineKeyboardButton("📝 Чаты ЧС", callback_data=AdminCB.BLACKLIST_CHATS)],
         [InlineKeyboardButton("✖ Закрыть", callback_data=AdminCB.CLOSE)],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -324,6 +331,122 @@ async def cancel_admin_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 
+# ===== Управление чатами ПВЗ =====
+
+async def manage_pvz_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Управление чатами ПВЗ"""
+    query = update.callback_query
+    await query.answer()
+
+    db: DatabaseService = context.bot_data["db"]
+    current_chats = await db.get_global_chats('pvz_monitoring_chats')
+
+    chats_text = "\n".join([f"• {chat}" for chat in current_chats]) if current_chats else "Нет настроенных чатов"
+
+    text = (
+        "📝 <b>Глобальные чаты для мониторинга ПВЗ</b>\n\n"
+        f"<b>Текущие чаты:</b>\n{chats_text}\n\n"
+        "Введите новый список чатов (по одному в строке):\n"
+        "<code>@pvz_zamena\n@pvz_jobs\n@pvz_work</code>"
+    )
+
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")]]
+    await query.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+    return AdminState.INPUT_PVZ_CHATS
+
+
+async def receive_pvz_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получен список чатов ПВЗ"""
+    chats_text = update.message.text.strip()
+    chats = [line.strip() for line in chats_text.split("\n") if line.strip()]
+
+    # Нормализация чатов (убрать @ если есть)
+    normalized_chats = []
+    for chat in chats:
+        chat = chat.strip()
+        if chat.startswith("@"):
+            normalized_chats.append(chat)
+        else:
+            normalized_chats.append(f"@{chat}")
+
+    db: DatabaseService = context.bot_data["db"]
+    await db.set_global_chats('pvz_monitoring_chats', normalized_chats)
+
+    chats_list = "\n".join([f"• {chat}" for chat in normalized_chats])
+
+    await update.message.reply_text(
+        f"✅ <b>Чаты ПВЗ обновлены!</b>\n\n"
+        f"Сохранено {len(normalized_chats)} чатов:\n{chats_list}",
+        parse_mode="HTML"
+    )
+
+    logger.info(f"Admin {update.effective_user.id} updated PVZ chats: {normalized_chats}")
+    return ConversationHandler.END
+
+
+# ===== Управление чатами ЧС =====
+
+async def manage_blacklist_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Управление чатами ЧС"""
+    query = update.callback_query
+    await query.answer()
+
+    db: DatabaseService = context.bot_data["db"]
+    current_chats = await db.get_global_chats('blacklist_chats')
+
+    chats_text = "\n".join([f"• {chat}" for chat in current_chats]) if current_chats else "Нет настроенных чатов"
+
+    text = (
+        "📝 <b>Глобальные чаты для черного списка</b>\n\n"
+        f"<b>Текущие чаты:</b>\n{chats_text}\n\n"
+        "Введите новый список чатов (по одному в строке):\n"
+        "<code>@blacklist_pvz\n@scam_reports</code>"
+    )
+
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")]]
+    await query.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+    return AdminState.INPUT_BLACKLIST_CHATS
+
+
+async def receive_blacklist_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получен список чатов ЧС"""
+    chats_text = update.message.text.strip()
+    chats = [line.strip() for line in chats_text.split("\n") if line.strip()]
+
+    # Нормализация чатов (убрать @ если есть)
+    normalized_chats = []
+    for chat in chats:
+        chat = chat.strip()
+        if chat.startswith("@"):
+            normalized_chats.append(chat)
+        else:
+            normalized_chats.append(f"@{chat}")
+
+    db: DatabaseService = context.bot_data["db"]
+    await db.set_global_chats('blacklist_chats', normalized_chats)
+
+    chats_list = "\n".join([f"• {chat}" for chat in normalized_chats])
+
+    await update.message.reply_text(
+        f"✅ <b>Чаты ЧС обновлены!</b>\n\n"
+        f"Сохранено {len(normalized_chats)} чатов:\n{chats_list}",
+        parse_mode="HTML"
+    )
+
+    logger.info(f"Admin {update.effective_user.id} updated blacklist chats: {normalized_chats}")
+    return ConversationHandler.END
+
+
 def register_admin_handlers(app):
     """Регистрация обработчиков админки"""
     # Команда /admin
@@ -361,6 +484,7 @@ def register_admin_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$"),
             CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
     )
     app.add_handler(grant_conv)
@@ -378,6 +502,43 @@ def register_admin_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$"),
             CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
         ],
     )
     app.add_handler(add_admin_conv)
+
+    # ConversationHandler: управление чатами ПВЗ
+    pvz_chats_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(manage_pvz_chats, pattern=f"^{AdminCB.PVZ_CHATS}$")
+        ],
+        states={
+            AdminState.INPUT_PVZ_CHATS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_pvz_chats)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$"),
+            CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
+        ],
+    )
+    app.add_handler(pvz_chats_conv)
+
+    # ConversationHandler: управление чатами ЧС
+    bl_chats_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(manage_blacklist_chats, pattern=f"^{AdminCB.BLACKLIST_CHATS}$")
+        ],
+        states={
+            AdminState.INPUT_BLACKLIST_CHATS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_blacklist_chats)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$"),
+            CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
+        ],
+    )
+    app.add_handler(bl_chats_conv)

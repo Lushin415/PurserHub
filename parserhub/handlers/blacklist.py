@@ -14,7 +14,7 @@ from parserhub.db_service import DatabaseService
 from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI
 from parserhub.validators import Validators
-from parserhub.handlers.start import cancel_and_return_to_menu
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
 
 
 # Состояния для ConversationHandler
@@ -51,33 +51,37 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
+        text = (
             "⚫ <b>Черный список</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт черного списка.",
-            reply_markup=reply_markup,
-            parse_mode="HTML",
+            "❌ Для работы необходимо авторизовать аккаунт черного списка."
         )
+
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         return
 
-    logger.info(f"[BLACKLIST] Показываем кнопки: CHECK_USER={BlacklistCB.CHECK_USER}, MANAGE_CHATS={BlacklistCB.MANAGE_CHATS}")
+    logger.info(f"[BLACKLIST] Показываем кнопки: CHECK_USER={BlacklistCB.CHECK_USER}")
     keyboard = [
         [InlineKeyboardButton("🔍 Проверить пользователя", callback_data=BlacklistCB.CHECK_USER)],
-        [InlineKeyboardButton("📋 Управление чатами ЧС", callback_data=BlacklistCB.MANAGE_CHATS)],
         [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
         "⚫ <b>Черный список</b>\n\n"
-        "Проверка пользователей в чатах черного списка.\n\n"
+        "Проверка пользователей по базе черного списка ПВЗ.\n\n"
+        "Чаты для проверки настраиваются администратором.\n\n"
         "Выберите действие:"
     )
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=text, reply_markup=reply_markup, parse_mode="HTML"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -156,10 +160,30 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(text, parse_mode="HTML")
 
     except Exception as e:
+        error_msg = str(e).lower()
         logger.error(f"Ошибка проверки ЧС: {e}")
-        await update.message.reply_text(
-            f"❌ Ошибка проверки:\n\n{str(e)}"
-        )
+
+        # Проверка на обрыв авторизации
+        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+            logger.warning(f"Обнаружен обрыв авторизации blacklist для user {update.effective_user.id}")
+
+            # Сбросить статус авторизации в БД
+            db: DatabaseService = context.bot_data["db"]
+            await db.update_auth_status(update.effective_user.id, "blacklist", False)
+
+            # Очистить данные пользователя
+            context.user_data.clear()
+
+            await update.message.reply_text(
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Ошибка проверки:\n\n{str(e)}"
+            )
 
     return ConversationHandler.END
 
@@ -340,10 +364,30 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return ConversationHandler.END
 
     except Exception as e:
+        error_msg = str(e).lower()
         logger.error(f"Ошибка добавления чата в ЧС: {e}")
-        await status_msg.edit_text(
-            f"❌ Ошибка:\n\n{str(e)}"
-        )
+
+        # Проверка на обрыв авторизации
+        if any(keyword in error_msg for keyword in ["authkeyinvalid", "auth", "session", "unauthorized", "сессия"]):
+            logger.warning(f"Обнаружен обрыв авторизации blacklist для user {user_id}")
+
+            # Сбросить статус авторизации в БД
+            db: DatabaseService = context.bot_data["db"]
+            await db.update_auth_status(user_id, "blacklist", False)
+
+            # Очистить данные пользователя
+            context.user_data.clear()
+
+            await status_msg.edit_text(
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ Ошибка:\n\n{str(e)}"
+            )
         return ConversationHandler.END
 
 
@@ -443,14 +487,6 @@ def register_blacklist_handlers(app):
         CallbackQueryHandler(show_blacklist_menu, pattern=f"^{BlacklistCB.BLACKLIST_MENU}$|^blacklist$")
     )
 
-    # Управление чатами
-    app.add_handler(
-        CallbackQueryHandler(show_manage_chats, pattern=f"^{BlacklistCB.MANAGE_CHATS}$")
-    )
-    app.add_handler(
-        CallbackQueryHandler(remove_chat, pattern=f"^{BlacklistCB.REMOVE_CHAT}")
-    )
-
     # ConversationHandler для проверки пользователя
     check_user_conv = ConversationHandler(
         entry_points=[
@@ -464,31 +500,7 @@ def register_blacklist_handlers(app):
         fallbacks=[
             CallbackQueryHandler(cancel_blacklist, pattern="^blacklist_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
+            MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
     )
     app.add_handler(check_user_conv)
-
-    # ConversationHandler для добавления чата (с поддержкой выбора топика)
-    add_chat_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_add_chat, pattern=f"^{BlacklistCB.ADD_CHAT}$")
-        ],
-        states={
-            BlacklistState.WAITING_ADD_CHAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_chat)
-            ],
-            BlacklistState.WAITING_SELECT_TOPIC: [
-                CallbackQueryHandler(
-                    receive_topic_selection,
-                    pattern=r"^bl_topic_"
-                ),
-            ],
-        },
-        fallbacks=[
-            CallbackQueryHandler(cancel_blacklist, pattern="^blacklist_cancel$"),
-            CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
-        ],
-    )
-    app.add_handler(add_chat_conv)

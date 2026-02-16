@@ -34,7 +34,7 @@ class WorkersAPI:
         notification_chat_id: int,
         parse_history_days: int = 3,
     ) -> dict:
-        """POST /workers/start - Запуск мониторинга ПВЗ"""
+        """POST /workers/start - Запуск мониторинга ПВЗ (уведомления через основной PurserHub бот)"""
         url = f"{self.base_url}/workers/start"
 
         payload = {
@@ -95,6 +95,19 @@ class WorkersAPI:
             return response.json()
         except httpx.HTTPError as e:
             logger.error(f"Ошибка получения списка для {task_id}: {e}")
+            raise
+
+    async def check_blacklist_by_item(self, item_id: int) -> dict:
+        """POST /workers/{item_id}/check-blacklist - Проверка автора объявления в ЧС"""
+        url = f"{self.base_url}/workers/{item_id}/check-blacklist"
+        params = {"task_id": "from_callback"}
+
+        try:
+            response = await self.client.post(url, params=params, timeout=60.0)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка проверки ЧС для объявления {item_id}: {e}")
             raise
 
     async def check_blacklist(self, username: str, blacklist_session_path: str) -> dict:
@@ -205,26 +218,26 @@ class RealtyAPI:
     async def start_parsing(
         self,
         user_id: int,
-        notification_bot_token: str,
-        notification_chat_id: int,
         avito_url: Optional[str] = None,
         cian_url: Optional[str] = None,
-        pages: int = 3,
+        notification_bot_token: Optional[str] = None,
+        notification_chat_id: Optional[int] = None,
     ) -> dict:
-        """POST /parse/start - Запуск парсинга недвижимости"""
+        """POST /parse/start - Запуск мониторинга недвижимости (уведомления через основной PurserHub бот)"""
         url = f"{self.base_url}/parse/start"
 
         payload = {
             "user_id": user_id,
-            "notification_bot_token": notification_bot_token,
-            "notification_chat_id": notification_chat_id,
-            "pages": pages,
         }
 
         if avito_url:
             payload["avito_url"] = avito_url
         if cian_url:
             payload["cian_url"] = cian_url
+        if notification_bot_token:
+            payload["notification_bot_token"] = notification_bot_token
+        if notification_chat_id:
+            payload["notification_chat_id"] = notification_chat_id
 
         try:
             response = await self.client.post(url, json=payload)

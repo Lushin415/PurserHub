@@ -1,21 +1,30 @@
 """Обработчик команды /start и главного меню"""
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, ConversationHandler
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
 
 
-# Callback data для кнопок
-class CB:
-    """Константы для callback_data"""
-    MAIN_MENU = "main_menu"
-    ACCOUNT = "account"
-    WORKERS = "workers"
-    REALTY = "realty"
-    BLACKLIST = "blacklist"
-    SUBSCRIPTION = "subscription_menu"
-    SETTINGS = "settings"
+# Текст кнопок главного меню
+class MenuButton:
+    """Константы для текста кнопок"""
+    ACCOUNT = "👤 Мой аккаунт"
+    WORKERS = "👷 Мониторинг ПВЗ"
+    REALTY = "🏠 Недвижимость"
+    BLACKLIST = "⚫ Черный список"
+    SUBSCRIPTION = "💳 Подписка"
+    SETTINGS = "⚙️ Настройки"
+    ADMIN = "🔧 Админ-панель"
+    BACK = "🔙 Назад"
+
+
+# Фильтр для кнопок главного меню (используется в fallbacks всех ConversationHandler)
+MAIN_MENU_FILTER = filters.Regex(
+    f"^({MenuButton.ACCOUNT}|{MenuButton.WORKERS}|{MenuButton.REALTY}|"
+    f"{MenuButton.BLACKLIST}|{MenuButton.SUBSCRIPTION}|{MenuButton.SETTINGS}|"
+    f"{MenuButton.ADMIN}|{MenuButton.BACK})$"
+)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,38 +45,77 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать главное меню"""
+    """Показать главное меню с Reply кнопками"""
+    from parserhub.handlers.admin import _is_admin
+
+    user_id = update.effective_user.id
+    db: DatabaseService = context.bot_data["db"]
+
     keyboard = [
-        [InlineKeyboardButton("👤 Мой аккаунт", callback_data=CB.ACCOUNT)],
-        [InlineKeyboardButton("👷 Мониторинг ПВЗ", callback_data=CB.WORKERS)],
-        [InlineKeyboardButton("🏠 Парсинг недвижимости", callback_data=CB.REALTY)],
-        [InlineKeyboardButton("⚫ Черный список", callback_data=CB.BLACKLIST)],
-        # [InlineKeyboardButton("💳 Подписка", callback_data=CB.SUBSCRIPTION)],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data=CB.SETTINGS)],
+        [KeyboardButton(MenuButton.ACCOUNT)],
+        [KeyboardButton(MenuButton.WORKERS)],
+        [KeyboardButton(MenuButton.REALTY)],
+        [KeyboardButton(MenuButton.BLACKLIST)],
+        [KeyboardButton(MenuButton.SUBSCRIPTION)],
+        [KeyboardButton(MenuButton.SETTINGS)],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if await _is_admin(user_id, db):
+        keyboard.append([KeyboardButton(MenuButton.ADMIN)])
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
     text = (
         "🤖 <b>ParserHub</b> — Оркестровый бот для управления парсерами\n\n"
         "Выберите нужный раздел:"
     )
 
-    # Если это callback query - редактируем сообщение
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-    else:
-        # Если команда - отправляем новое сообщение
+    # Отправляем новое сообщение с Reply клавиатурой
+    if update.message:
         await update.message.reply_text(
             text=text, reply_markup=reply_markup, parse_mode="HTML"
         )
+    elif update.callback_query:
+        # Если пришло из callback (для совместимости)
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(
+            text=text, reply_markup=reply_markup, parse_mode="HTML"
+        )
 
 
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик возврата в главное меню"""
-    await show_main_menu(update, context)
+async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на кнопки главного меню"""
+    text = update.message.text
+
+    # Импорты других обработчиков (чтобы избежать циклических импортов)
+    from parserhub.handlers.auth import show_account_menu
+    from parserhub.handlers.workers import show_workers_menu
+    from parserhub.handlers.realty import show_realty_menu
+    from parserhub.handlers.blacklist import show_blacklist_menu
+    from parserhub.handlers.subscription import subscription_menu
+    from parserhub.handlers.settings import show_settings_menu
+
+    # Маршрутизация по тексту кнопки
+    if text == MenuButton.ACCOUNT:
+        await show_account_menu(update, context)
+    elif text == MenuButton.WORKERS:
+        await show_workers_menu(update, context)
+    elif text == MenuButton.REALTY:
+        await show_realty_menu(update, context)
+    elif text == MenuButton.BLACKLIST:
+        await show_blacklist_menu(update, context)
+    elif text == MenuButton.SUBSCRIPTION:
+        await subscription_menu(update, context)
+    elif text == MenuButton.SETTINGS:
+        await show_settings_menu(update, context)
+    elif text == MenuButton.ADMIN:
+        from parserhub.handlers.admin import admin_command
+        await admin_command(update, context)
+    elif text == MenuButton.BACK:
+        await show_main_menu(update, context)
 
 
 async def cancel_and_return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -76,6 +124,9 @@ async def cancel_and_return_to_menu(update: Update, context: ContextTypes.DEFAUL
     Используется как fallback в ConversationHandler для выхода из состояний.
     """
     logger.info(f"Пользователь {update.effective_user.id} отменил операцию")
+
+    # Очистить данные пользователя из context
+    context.user_data.clear()
 
     # Если есть сообщение - отправляем уведомление об отмене
     if update.message:
@@ -90,5 +141,7 @@ async def cancel_and_return_to_menu(update: Update, context: ContextTypes.DEFAUL
 def register_start_handlers(app):
     """Регистрация обработчиков команды /start и главного меню"""
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("menu", start_command))  # /menu - алиас для /start
-    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=f"^{CB.MAIN_MENU}$"))
+    # Обработчик для кнопок главного меню (Reply кнопки)
+    app.add_handler(MessageHandler(MAIN_MENU_FILTER, menu_button_handler))
+    # Обработчик для Inline-кнопки "Назад" → главное меню
+    app.add_handler(CallbackQueryHandler(show_main_menu, pattern="^main_menu$"))

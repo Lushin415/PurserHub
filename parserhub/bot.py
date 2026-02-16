@@ -87,7 +87,6 @@ async def post_init(application: Application):
     # Установить команды бота (Menu Button)
     commands = [
         BotCommand("start", "🏠 Главное меню"),
-        BotCommand("menu", "📋 Главное меню"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Команды бота установлены (Menu Button)")
@@ -148,11 +147,11 @@ def main():
     register_start_handlers(app)
     register_auth_handlers(app)
     register_settings_handlers(app)
-    # register_subscription_handlers(app)  # Подписки — временно отключены
+    register_subscription_handlers(app)
     register_workers_handlers(app)
     register_realty_handlers(app)
     register_blacklist_handlers(app)
-    # register_admin_handlers(app)  # Админка — временно отключена
+    register_admin_handlers(app)
 
     logger.info("Handlers зарегистрированы")
 

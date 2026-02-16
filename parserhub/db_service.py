@@ -1,5 +1,6 @@
 """Сервис для работы с SQLite базой данных"""
 import aiosqlite
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -35,9 +36,6 @@ class DatabaseService:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id INTEGER PRIMARY KEY,
-                    realty_bot_token TEXT,
-                    realty_chat_id INTEGER,
-                    workers_chat_id INTEGER,
                     default_mode TEXT DEFAULT 'worker',
                     FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
@@ -75,6 +73,14 @@ class DatabaseService:
                     amount INTEGER NOT NULL,
                     currency TEXT NOT NULL DEFAULT 'RUB',
                     created_at TEXT NOT NULL
+                )
+            """)
+
+            # Таблица глобальных настроек (для чатов ПВЗ и ЧС)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS global_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             """)
 
@@ -171,15 +177,10 @@ class DatabaseService:
             await db.execute(
                 """
                 UPDATE user_settings
-                SET realty_bot_token = ?, realty_chat_id = ?,
-                    workers_chat_id = ?,
-                    default_mode = ?
+                SET default_mode = ?
                 WHERE user_id = ?
                 """,
                 (
-                    settings.realty_bot_token,
-                    settings.realty_chat_id,
-                    settings.workers_chat_id,
                     settings.default_mode,
                     settings.user_id,
                 ),
@@ -271,6 +272,46 @@ class DatabaseService:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
             await db.commit()
+
+    # ===== Глобальные настройки =====
+
+    async def get_global_chats(self, key: str) -> list:
+        """Получить список чатов из global_config
+
+        Args:
+            key: Ключ настройки ('pvz_monitoring_chats' или 'blacklist_chats')
+
+        Returns:
+            Список чатов или пустой список
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT value FROM global_config WHERE key = ?", (key,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    try:
+                        return json.loads(row[0])
+                    except json.JSONDecodeError:
+                        logger.error(f"Не удалось распарсить JSON для ключа {key}")
+                        return []
+                return []
+
+    async def set_global_chats(self, key: str, chats: list):
+        """Сохранить список чатов в global_config
+
+        Args:
+            key: Ключ настройки ('pvz_monitoring_chats' или 'blacklist_chats')
+            chats: Список чатов для сохранения
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            value_json = json.dumps(chats, ensure_ascii=False)
+            await db.execute(
+                "INSERT OR REPLACE INTO global_config (key, value) VALUES (?, ?)",
+                (key, value_json),
+            )
+            await db.commit()
+            logger.info(f"Сохранены глобальные чаты для {key}: {len(chats)} чатов")
 
     # ===== Платежи =====
 
