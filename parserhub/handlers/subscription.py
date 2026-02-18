@@ -33,7 +33,7 @@ async def subscription_keyboard(service: SubscriptionService):
     """Клавиатура выбора тарифа (цены из БД)"""
     plans = await service.get_plans()
     buttons = []
-    for key in ["day", "month", "quarter"]:
+    for key in ["day", "week", "month"]:
         plan = plans[key]
         price_rub = plan["price"] // 100
         buttons.append([InlineKeyboardButton(
@@ -210,7 +210,7 @@ def register_subscription_handlers(app):
     app.add_handler(CallbackQueryHandler(subscription_menu, pattern=f"^{SubCB.MENU}$"))
 
     # Покупка
-    app.add_handler(CallbackQueryHandler(buy_subscription, pattern="^buy_(day|month|quarter)$"))
+    app.add_handler(CallbackQueryHandler(buy_subscription, pattern="^buy_(day|week|month)$"))
 
     # Pre-checkout (обязательно для Telegram Payments)
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))

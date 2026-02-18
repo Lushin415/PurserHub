@@ -187,8 +187,8 @@ async def grant_sub_receive_user(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard = [
         [InlineKeyboardButton("1 день", callback_data=f"{AdminCB.GRANT_PLAN}day")],
+        [InlineKeyboardButton("7 дней", callback_data=f"{AdminCB.GRANT_PLAN}week")],
         [InlineKeyboardButton("30 дней", callback_data=f"{AdminCB.GRANT_PLAN}month")],
-        [InlineKeyboardButton("90 дней", callback_data=f"{AdminCB.GRANT_PLAN}quarter")],
         [InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")],
     ]
 
@@ -899,7 +899,7 @@ async def manage_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["💰 <b>Цены подписок</b>\n"]
     keyboard = []
-    for key in ["day", "month", "quarter"]:
+    for key in ["day", "week", "month"]:
         plan = plans[key]
         price_rub = plan["price"] // 100
         lines.append(f"• {plan['label']}: <b>{price_rub} RUB</b>")

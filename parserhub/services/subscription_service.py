@@ -10,8 +10,8 @@ class SubscriptionService:
 
     DEFAULT_PLANS = {
         "day": {"days": 1, "price": 10000, "label": "1 день"},
-        "month": {"days": 30, "price": 50000, "label": "30 дней"},
-        "quarter": {"days": 90, "price": 100000, "label": "90 дней"},
+        "week": {"days": 7, "price": 19900, "label": "7 дней"},
+        "month": {"days": 30, "price": 49900, "label": "30 дней"},
     }
 
     def __init__(self, db_path: str):
