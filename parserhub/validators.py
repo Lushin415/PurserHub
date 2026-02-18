@@ -45,23 +45,23 @@ class Validators:
     @staticmethod
     def validate_date(date_str: str) -> Tuple[bool, Optional[datetime], Optional[str]]:
         """
-        Валидация даты в формате YYYY-MM-DD
+        Валидация даты в формате ДД.ММ.ГГГГ
         Returns: (valid, datetime_obj, error_message)
         """
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            dt = datetime.strptime(date_str, "%d.%m.%Y")
         except ValueError:
-            return False, None, "❌ Неверный формат даты. Используйте: YYYY-MM-DD (например, 2026-02-05)"
+            return False, None, "❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ (например, 05.02.2026)"
 
         # Проверка на адекватность (не раньше 2020 и не позже +2 года)
         min_date = datetime(2020, 1, 1)
         max_date = datetime.now() + timedelta(days=730)  # +2 года
 
         if dt < min_date:
-            return False, None, "❌ Дата слишком старая (не раньше 2020-01-01)"
+            return False, None, "❌ Дата слишком старая (не раньше 01.01.2020)"
 
         if dt > max_date:
-            return False, None, f"❌ Дата слишком далеко в будущем (не позже {max_date.strftime('%Y-%m-%d')})"
+            return False, None, f"❌ Дата слишком далеко в будущем (не позже {max_date.strftime('%d.%m.%Y')})"
 
         return True, dt, None
 

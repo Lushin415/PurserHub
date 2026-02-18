@@ -82,12 +82,13 @@ async def post_init(application: Application):
     application.bot_data["realty_api"] = realty_api
 
     # Запустить фоновую очистку истёкших подписок
-    asyncio.create_task(_subscription_cleaner_loop(application))
+    application.bot_data["cleaner_task"] = asyncio.create_task(
+        _subscription_cleaner_loop(application)
+    )
 
     # Установить команды бота (Menu Button)
     commands = [
         BotCommand("start", "🏠 Главное меню"),
-        BotCommand("menu", "📋 Главное меню"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Команды бота установлены (Menu Button)")
@@ -114,12 +115,24 @@ async def post_shutdown(application: Application):
     """Очистка при остановке бота"""
     logger.info("Остановка бота...")
 
+    # Сбросить зависшие задачи в БД
+    if "db" in application.bot_data:
+        db: DatabaseService = application.bot_data["db"]
+        removed = await db.clear_running_tasks()
+        if removed:
+            logger.info(f"Очищено зависших задач: {removed}")
+
     # Закрыть HTTP клиенты
     if "workers_api" in application.bot_data:
         await application.bot_data["workers_api"].close()
 
     if "realty_api" in application.bot_data:
         await application.bot_data["realty_api"].close()
+
+    # Отменить фоновую задачу очистки подписок
+    cleaner_task = application.bot_data.get("cleaner_task")
+    if cleaner_task and not cleaner_task.done():
+        cleaner_task.cancel()
 
     logger.info("Бот остановлен")
 
@@ -145,14 +158,17 @@ def main():
     )
 
     # Регистрация handlers (порядок важен!)
-    register_start_handlers(app)
+    # ConversationHandler'ы регистрируются ДО start_handlers, чтобы их fallback'и
+    # перехватывали кнопки меню ("❌ Отмена", "🔙 Назад" и т.д.) раньше
+    # глобального menu_button_handler — иначе состояние диалога не сбрасывается.
     register_auth_handlers(app)
     register_settings_handlers(app)
-    # register_subscription_handlers(app)  # Подписки — временно отключены
+    register_subscription_handlers(app)
     register_workers_handlers(app)
     register_realty_handlers(app)
     register_blacklist_handlers(app)
-    # register_admin_handlers(app)  # Админка — временно отключена
+    register_admin_handlers(app)
+    register_start_handlers(app)  # ПОСЛЕДНИМ: catch-all для главного меню
 
     logger.info("Handlers зарегистрированы")
 

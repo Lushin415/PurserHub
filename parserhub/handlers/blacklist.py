@@ -1,5 +1,6 @@
 """Обработчики черного списка"""
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Bot
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -11,10 +12,9 @@ from telegram.ext import (
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
-from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI
 from parserhub.validators import Validators
-from parserhub.handlers.start import cancel_and_return_to_menu
+from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton
 
 
 # Состояния для ConversationHandler
@@ -27,12 +27,16 @@ class BlacklistState:
 # Callback data
 class BlacklistCB:
     BLACKLIST_MENU = "blacklist_menu"
-    CHECK_USER = "blacklist_check_user"
     MANAGE_CHATS = "blacklist_manage_chats"
     ADD_CHAT = "blacklist_add_chat"
     REMOVE_CHAT = "blacklist_remove_chat_"
     SELECT_TOPIC = "bl_topic_"
     SELECT_ALL_TOPICS = "bl_topic_all"
+
+
+# Reply-кнопки подменю
+class BlacklistBtn:
+    CHECK = "🔍 Проверить пользователя"
 
 
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,65 +49,154 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"[BLACKLIST] user.is_blacklist_authorized = {user.is_blacklist_authorized}")
 
     if not user.is_blacklist_authorized:
-        keyboard = [
-            [InlineKeyboardButton("🔑 Авторизовать аккаунт", callback_data="auth_blacklist")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = ReplyKeyboardMarkup([
+            [KeyboardButton(MenuButton.ACCOUNT)],
+            [KeyboardButton(MenuButton.BACK)],
+        ], resize_keyboard=True)
 
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
+        text = (
             "⚫ <b>Черный список</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт черного списка.",
-            reply_markup=reply_markup,
-            parse_mode="HTML",
+            "❌ Для работы необходимо авторизовать аккаунт черного списка.\n\n"
+            "Перейдите в «👤 Мой аккаунт» для авторизации."
         )
+
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         return
 
-    logger.info(f"[BLACKLIST] Показываем кнопки: CHECK_USER={BlacklistCB.CHECK_USER}, MANAGE_CHATS={BlacklistCB.MANAGE_CHATS}")
-    keyboard = [
-        [InlineKeyboardButton("🔍 Проверить пользователя", callback_data=BlacklistCB.CHECK_USER)],
-        [InlineKeyboardButton("📋 Управление чатами ЧС", callback_data=BlacklistCB.MANAGE_CHATS)],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(BlacklistBtn.CHECK)],
+        [KeyboardButton(MenuButton.BACK)],
+    ], resize_keyboard=True)
 
     text = (
         "⚫ <b>Черный список</b>\n\n"
-        "Проверка пользователей в чатах черного списка.\n\n"
+        "Проверка пользователей по базе черного списка ПВЗ.\n\n"
         "Выберите действие:"
     )
 
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=text, reply_markup=reply_markup, parse_mode="HTML"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало проверки пользователя"""
     logger.info(f"[BLACKLIST] start_check_user вызван от user {update.effective_user.id}")
-    query = update.callback_query
-    await query.answer()
 
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="blacklist_cancel")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
 
-    await query.edit_message_text(
-        "🔍 <b>Проверка в черном списке</b>\n\n"
+    await update.message.reply_text(
+        "🔍 <b>Проверка в чёрном списке</b>\n\n"
         "Введите username для проверки:\n"
-        "<code>@username</code>",
-        reply_markup=reply_markup,
+        "<code>@username</code>\n\n"
+        "⏳ <i>Поиск занимает несколько минут — бот пришлёт результат автоматически.</i>",
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
     return BlacklistState.WAITING_USERNAME
 
 
+async def _blacklist_search_task(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    username: str,
+    normalized_username: str,
+    workers_api: WorkersAPI,
+    db: DatabaseService,
+    blacklist_session_path: str,
+):
+    """Фоновая задача поиска в ЧС — выполняется без блокировки бота"""
+    try:
+        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
+
+        # Проверяем ошибку авторизации в теле ответа
+        if not result.get("found") and result.get("error"):
+            error_text = result["error"]
+            if "AUTH_KEY_UNREGISTERED" in error_text or "AUTH_KEY_INVALID" in error_text:
+                logger.warning(f"AUTH_KEY_UNREGISTERED в blacklist сессии для user {user_id}")
+                await db.update_auth_status(user_id, "blacklist", False)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ <b>Сессия авторизации не найдена</b>\n\n"
+                        "Telegram аннулировал сессию поиска в чёрном списке.\n"
+                        "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                    ),
+                    parse_mode="HTML",
+                )
+                return
+
+        if result["found"]:
+            info = result.get("extracted_info", {})
+            username_info = info.get("username", "—")
+            phone = info.get("phone", "—")
+            found_user_id = info.get("user_id", "—")
+            message_link = result.get("message_link", "—")
+            chat = result.get("chat", "—")
+            raw_text = result.get("message_text", "")
+            msg_text = raw_text[:3800] + "...\n[текст обрезан]" if len(raw_text) > 3800 else raw_text
+            text = (
+                "⚠️ <b>Пользователь найден в черном списке!</b>\n\n"
+                f"<b>Username:</b> {username_info}\n"
+                f"<b>Телефон:</b> {phone}\n"
+                f"<b>User ID:</b> {found_user_id}\n\n"
+                #f"<b>Чат ЧС:</b> {chat}\n"
+                #f"<b>Ссылка на сообщение:</b>\n{message_link}\n\n"
+                f"<b>Текст записи:</b>\n<i>{msg_text}</i>"
+            )
+        else:
+            text = (
+                "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
+                f"<b>Username:</b> {username}\n"
+                f"<b>Проверено сообщений:</b> {result.get('messages_checked', 0)}\n"
+                f"<b>Проверено чатов:</b> {len(result.get('chats_checked', []))}"
+            )
+
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка фонового поиска в ЧС для user {user_id}: {e}")
+
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
+            await db.update_auth_status(user_id, "blacklist", False)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ <b>Авторизация оборвана</b>\n\n"
+                    "Произошла ошибка со стороны Telegram.\n"
+                    "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Ошибка проверки:\n\n{str(e)}"
+            )
+
+
 async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен username - проверяем в ЧС"""
+    """Получен username - запускаем поиск в ЧС в фоне"""
     username = update.message.text.strip()
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # Валидация username
     valid, normalized_username, error = Validators.validate_username(username)
@@ -117,49 +210,27 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return BlacklistState.WAITING_USERNAME
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
-    session_mgr: SessionManager = context.bot_data["session_manager"]
+    db: DatabaseService = context.bot_data["db"]
+    blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
-    # Получить путь к blacklist сессии
-    blacklist_session_path = session_mgr.get_session_path(user_id, "blacklist")
+    # Сразу сообщаем пользователю и освобождаем бота
+    await update.message.reply_text(
+        f"🔍 Поиск <b>{normalized_username}</b> в чёрном списке запущен.\n\n"
+        "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
+        parse_mode="HTML",
+    )
 
-    try:
-        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
-
-        if result["found"]:
-            # Найден в ЧС
-            info = result.get("extracted_info", {})
-            username_info = info.get("username", "—")
-            phone = info.get("phone", "—")
-            user_id = info.get("user_id", "—")
-
-            message_link = result.get("message_link", "—")
-            chat = result.get("chat", "—")
-
-            text = (
-                "⚠️ <b>Пользователь найден в черном списке!</b>\n\n"
-                f"<b>Username:</b> {username_info}\n"
-                f"<b>Телефон:</b> {phone}\n"
-                f"<b>User ID:</b> {user_id}\n\n"
-                f"<b>Чат ЧС:</b> {chat}\n"
-                f"<b>Ссылка на сообщение:</b>\n{message_link}\n\n"
-                f"<b>Текст записи:</b>\n<i>{result.get('message_text', '')[:200]}...</i>"
-            )
-        else:
-            # Не найден
-            text = (
-                "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
-                f"<b>Username:</b> {username}\n"
-                f"<b>Проверено сообщений:</b> {result.get('messages_checked', 0)}\n"
-                f"<b>Проверено чатов:</b> {len(result.get('chats_checked', []))}"
-            )
-
-        await update.message.reply_text(text, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"Ошибка проверки ЧС: {e}")
-        await update.message.reply_text(
-            f"❌ Ошибка проверки:\n\n{str(e)}"
-        )
+    # Запускаем поиск в фоне
+    asyncio.create_task(_blacklist_search_task(
+        bot=context.bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+        normalized_username=normalized_username,
+        workers_api=workers_api,
+        db=db,
+        blacklist_session_path=blacklist_session_path,
+    ))
 
     return ConversationHandler.END
 
@@ -276,10 +347,9 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return BlacklistState.WAITING_ADD_CHAT
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
-    session_mgr: SessionManager = context.bot_data["session_manager"]
 
-    # Получаем путь к blacklist сессии для проверки топиков
-    blacklist_session_path = session_mgr.get_session_path(user_id, "blacklist")
+    # Путь к blacklist-сессии в контексте workers-service контейнера
+    blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
     # Показываем индикатор загрузки
     status_msg = await update.message.reply_text("🔍 Проверяю чат...")
@@ -341,9 +411,35 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     except Exception as e:
         logger.error(f"Ошибка добавления чата в ЧС: {e}")
-        await status_msg.edit_text(
-            f"❌ Ошибка:\n\n{str(e)}"
-        )
+
+        # Определяем: ошибка авторизации или другая?
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
+            logger.warning(f"Обнаружен обрыв авторизации blacklist для user {user_id}")
+
+            # Сбросить статус авторизации в БД
+            db: DatabaseService = context.bot_data["db"]
+            await db.update_auth_status(user_id, "blacklist", False)
+
+            # Очистить данные пользователя
+            context.user_data.clear()
+
+            await status_msg.edit_text(
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ Ошибка:\n\n{str(e)}"
+            )
         return ConversationHandler.END
 
 
@@ -427,9 +523,11 @@ async def remove_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена операции"""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Операция отменена.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Операция отменена.")
+    else:
+        await update.message.reply_text("❌ Операция отменена.")
     # Очищаем user_data
     context.user_data.pop("bl_add_chat_username", None)
     context.user_data.pop("bl_add_chat_title", None)
@@ -438,57 +536,26 @@ async def cancel_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def register_blacklist_handlers(app):
     """Регистрация обработчиков черного списка"""
-    # Меню
+    # Inline callback: возврат в меню из callback_query
     app.add_handler(
         CallbackQueryHandler(show_blacklist_menu, pattern=f"^{BlacklistCB.BLACKLIST_MENU}$|^blacklist$")
     )
 
-    # Управление чатами
-    app.add_handler(
-        CallbackQueryHandler(show_manage_chats, pattern=f"^{BlacklistCB.MANAGE_CHATS}$")
-    )
-    app.add_handler(
-        CallbackQueryHandler(remove_chat, pattern=f"^{BlacklistCB.REMOVE_CHAT}")
-    )
-
-    # ConversationHandler для проверки пользователя
+    # ConversationHandler для проверки пользователя (Reply-кнопки)
     check_user_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_check_user, pattern=f"^{BlacklistCB.CHECK_USER}$")
+            MessageHandler(filters.Regex(f"^{BlacklistBtn.CHECK}$"), start_check_user),
         ],
         states={
             BlacklistState.WAITING_USERNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_username)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_username)
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(cancel_blacklist, pattern="^blacklist_cancel$"),
             CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
+            MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
+        conversation_timeout=300,
+        allow_reentry=True,
     )
     app.add_handler(check_user_conv)
-
-    # ConversationHandler для добавления чата (с поддержкой выбора топика)
-    add_chat_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_add_chat, pattern=f"^{BlacklistCB.ADD_CHAT}$")
-        ],
-        states={
-            BlacklistState.WAITING_ADD_CHAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_chat)
-            ],
-            BlacklistState.WAITING_SELECT_TOPIC: [
-                CallbackQueryHandler(
-                    receive_topic_selection,
-                    pattern=r"^bl_topic_"
-                ),
-            ],
-        },
-        fallbacks=[
-            CallbackQueryHandler(cancel_blacklist, pattern="^blacklist_cancel$"),
-            CommandHandler("start", cancel_and_return_to_menu),
-            CommandHandler("menu", cancel_and_return_to_menu),
-        ],
-    )
-    app.add_handler(add_chat_conv)

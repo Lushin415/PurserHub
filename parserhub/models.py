@@ -22,13 +22,6 @@ class UserSettings(BaseModel):
     """Настройки пользователя"""
     user_id: int
 
-    # Бот для уведомлений: недвижимость
-    realty_bot_token: Optional[str] = None
-    realty_chat_id: Optional[int] = None
-
-    # Chat ID для уведомлений ПВЗ (общий бот workers_service)
-    workers_chat_id: Optional[int] = None
-
     # Defaults
     default_mode: Literal["worker", "employer"] = "worker"
 
@@ -58,14 +51,13 @@ class WorkersFilters(BaseModel):
 
 
 class StartMonitoringRequest(BaseModel):
-    """Запрос на запуск мониторинга ПВЗ"""
+    """Запрос на запуск мониторинга ПВЗ (уведомления через основной PurserHub бот)"""
     user_id: int
     mode: Literal["worker", "employer"]
     chats: list[str]
     filters: WorkersFilters
     session_path: str
     blacklist_session_path: str
-    notification_chat_id: int  # Chat ID для уведомлений (общий бот workers_service)
     parse_history_days: int = 3
 
 
@@ -80,13 +72,10 @@ class MonitoringStatus(BaseModel):
 # ===== Модели для Realty Service =====
 
 class StartParsingRequest(BaseModel):
-    """Запрос на запуск парсинга недвижимости"""
+    """Запрос на запуск парсинга недвижимости (уведомления через основной PurserHub бот)"""
     user_id: int
-    notification_bot_token: str
-    notification_chat_id: int
     avito_url: Optional[str] = None
     cian_url: Optional[str] = None
-    pages: int = 3
 
 
 class ParsingStatus(BaseModel):

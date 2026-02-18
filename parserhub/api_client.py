@@ -34,7 +34,7 @@ class WorkersAPI:
         notification_chat_id: int,
         parse_history_days: int = 3,
     ) -> dict:
-        """POST /workers/start - Запуск мониторинга ПВЗ"""
+        """POST /workers/start - Запуск мониторинга ПВЗ (уведомления через основной PurserHub бот)"""
         url = f"{self.base_url}/workers/start"
 
         payload = {
@@ -97,6 +97,19 @@ class WorkersAPI:
             logger.error(f"Ошибка получения списка для {task_id}: {e}")
             raise
 
+    async def check_blacklist_by_item(self, item_id: int) -> dict:
+        """POST /workers/{item_id}/check-blacklist - Проверка автора объявления в ЧС"""
+        url = f"{self.base_url}/workers/{item_id}/check-blacklist"
+        params = {"task_id": "from_callback"}
+
+        try:
+            response = await self.client.post(url, params=params, timeout=1200.0)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка проверки ЧС для объявления {item_id}: {e}")
+            raise
+
     async def check_blacklist(self, username: str, blacklist_session_path: str) -> dict:
         """POST /blacklist/check?username={username} - Проверка в ЧС"""
         url = f"{self.base_url}/blacklist/check"
@@ -106,7 +119,7 @@ class WorkersAPI:
         }
 
         try:
-            response = await self.client.post(url, params=params)
+            response = await self.client.post(url, params=params, timeout=1200.0)
             response.raise_for_status()
             data = response.json()
             logger.info(f"Проверка ЧС для {username}: found={data.get('found')}")
@@ -190,6 +203,17 @@ class WorkersAPI:
             logger.error(f"Ошибка удаления чата {chat_username} из ЧС: {e}")
             raise
 
+    async def sync_blacklist_chats(self, chats: list) -> dict:
+        """POST /blacklist/chats/sync - Синхронизировать список чатов ЧС"""
+        url = f"{self.base_url}/blacklist/chats/sync"
+        try:
+            response = await self.client.post(url, json=chats)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка синхронизации чатов ЧС: {e}")
+            raise
+
 
 class RealtyAPI:
     """HTTP клиент к avito_cian_parser"""
@@ -205,35 +229,35 @@ class RealtyAPI:
     async def start_parsing(
         self,
         user_id: int,
-        notification_bot_token: str,
-        notification_chat_id: int,
         avito_url: Optional[str] = None,
         cian_url: Optional[str] = None,
-        pages: int = 3,
+        notification_bot_token: Optional[str] = None,
+        notification_chat_id: Optional[int] = None,
     ) -> dict:
-        """POST /parse/start - Запуск парсинга недвижимости"""
+        """POST /parse/start - Запуск мониторинга недвижимости (уведомления через основной PurserHub бот)"""
         url = f"{self.base_url}/parse/start"
 
         payload = {
             "user_id": user_id,
-            "notification_bot_token": notification_bot_token,
-            "notification_chat_id": notification_chat_id,
-            "pages": pages,
         }
 
         if avito_url:
             payload["avito_url"] = avito_url
         if cian_url:
             payload["cian_url"] = cian_url
+        if notification_bot_token:
+            payload["notification_bot_token"] = notification_bot_token
+        if notification_chat_id:
+            payload["notification_chat_id"] = notification_chat_id
 
         try:
             response = await self.client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
-            logger.info(f"Парсинг запущен: task_id={data.get('task_id')}")
+            logger.info(f"Мониторинг запущен: task_id={data.get('task_id')}")
             return data
         except httpx.HTTPError as e:
-            logger.error(f"Ошибка запуска парсинга: {e}")
+            logger.error(f"Ошибка запуска мониторинга: {e}")
             raise
 
     async def stop_parsing(self, task_id: str) -> dict:
@@ -244,10 +268,10 @@ class RealtyAPI:
             response = await self.client.post(url)
             response.raise_for_status()
             data = response.json()
-            logger.info(f"Парсинг остановлен: {task_id}")
+            logger.info(f"Мониторинг остановлен: {task_id}")
             return data
         except httpx.HTTPError as e:
-            logger.error(f"Ошибка остановки парсинга {task_id}: {e}")
+            logger.error(f"Ошибка остановки Мониторинг {task_id}: {e}")
             raise
 
     async def get_status(self, task_id: str) -> dict:
@@ -259,5 +283,39 @@ class RealtyAPI:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as e:
-            logger.error(f"Ошибка получения статуса парсинга {task_id}: {e}")
+            logger.error(f"Ошибка получения статуса мониторинга {task_id}: {e}")
+            raise
+
+    async def get_proxy(self) -> dict:
+        """GET /config/proxy - Получить текущие настройки прокси"""
+        url = f"{self.base_url}/config/proxy"
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка получения настроек прокси: {e}")
+            raise
+
+    async def update_proxy(self, proxy_string: str, proxy_change_url: str) -> dict:
+        """POST /config/proxy - Обновить настройки прокси"""
+        url = f"{self.base_url}/config/proxy"
+        payload = {"proxy_string": proxy_string, "proxy_change_url": proxy_change_url}
+        try:
+            response = await self.client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка обновления настроек прокси: {e}")
+            raise
+
+    async def restart_service(self) -> dict:
+        """POST /admin/restart - Перезапустить сервис недвижимости"""
+        url = f"{self.base_url}/admin/restart"
+        try:
+            response = await self.client.post(url)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка перезапуска сервиса: {e}")
             raise
