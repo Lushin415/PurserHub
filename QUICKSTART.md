@@ -76,9 +76,9 @@ docker compose version
 mkdir -p /opt/scanbot && cd /opt/scanbot
 
 # Клонировать все три репозитория
-git clone https://github.com/ВАШ_АККАУНТ/PurserHub.git
-git clone https://github.com/ВАШ_АККАУНТ/workers_service.git
-git clone https://github.com/ВАШ_АККАУНТ/parser_avito_cian.git
+git clone https://github.com/Lushin415/PurserHub.git
+git clone https://github.com/Lushin415/workers_service.git
+git clone https://github.com/Lushin415/parser_avito_cian.git
 
 # Должна получиться такая структура:
 # /opt/scanbot/
@@ -87,31 +87,33 @@ git clone https://github.com/ВАШ_АККАУНТ/parser_avito_cian.git
 # └── parser_avito_cian/
 ```
 
-### Шаг 3 — Создать .env файлы
+### Шаг 3 — Подготовить окружение (один скрипт)
 
 ```bash
-# PurserHub
 cd /opt/scanbot/PurserHub
-cp .env.example .env
-nano .env   # заполните BOT_TOKEN, ADMIN_ID, API_ID, API_HASH
-
-# workers_service
-cd /opt/scanbot/workers_service
-cp .env.example .env
-nano .env   # заполните API_ID, API_HASH (те же, что в PurserHub)
+bash setup.sh
 ```
 
-### Шаг 4 — Создать пустые файлы для realty-monitor
+Скрипт автоматически создаст все нужные директории, пустые файлы для Docker volumes и скопирует `.env.example` → `.env` для каждого сервиса.
+
+### Шаг 4 — Заполнить .env файлы
 
 ```bash
-# Docker монтирует эти файлы как volumes — они должны существовать до запуска
-touch /opt/scanbot/parser_avito_cian/cookies.json
-touch /opt/scanbot/parser_avito_cian/cookies_cian.json
-touch /opt/scanbot/parser_avito_cian/database.db
-mkdir -p /opt/scanbot/parser_avito_cian/logs
-mkdir -p /opt/scanbot/parser_avito_cian/result
-mkdir -p /opt/scanbot/workers_service/data/db
-mkdir -p /opt/scanbot/workers_service/data/logs
+nano /opt/scanbot/PurserHub/.env
+```
+```env
+BOT_TOKEN=токен_от_BotFather
+ADMIN_ID=ваш_Telegram_ID
+API_ID=ваш_api_id
+API_HASH=ваш_api_hash
+```
+
+```bash
+nano /opt/scanbot/workers_service/.env
+```
+```env
+API_ID=ваш_api_id      # те же, что в PurserHub
+API_HASH=ваш_api_hash
 ```
 
 ### Шаг 5 — Запустить
