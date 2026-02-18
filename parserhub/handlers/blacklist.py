@@ -1,5 +1,6 @@
 """Обработчики черного списка"""
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Bot
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -74,7 +75,6 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = (
         "⚫ <b>Черный список</b>\n\n"
         "Проверка пользователей по базе черного списка ПВЗ.\n\n"
-        "Чаты для проверки настраиваются администратором.\n\n"
         "Выберите действие:"
     )
 
@@ -94,9 +94,10 @@ async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ], resize_keyboard=True)
 
     await update.message.reply_text(
-        "🔍 <b>Проверка в черном списке</b>\n\n"
+        "🔍 <b>Проверка в чёрном списке</b>\n\n"
         "Введите username для проверки:\n"
-        "<code>@username</code>",
+        "<code>@username</code>\n\n"
+        "⏳ <i>Поиск занимает несколько минут — бот пришлёт результат автоматически.</i>",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -104,10 +105,98 @@ async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return BlacklistState.WAITING_USERNAME
 
 
+async def _blacklist_search_task(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    username: str,
+    normalized_username: str,
+    workers_api: WorkersAPI,
+    db: DatabaseService,
+    blacklist_session_path: str,
+):
+    """Фоновая задача поиска в ЧС — выполняется без блокировки бота"""
+    try:
+        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
+
+        # Проверяем ошибку авторизации в теле ответа
+        if not result.get("found") and result.get("error"):
+            error_text = result["error"]
+            if "AUTH_KEY_UNREGISTERED" in error_text or "AUTH_KEY_INVALID" in error_text:
+                logger.warning(f"AUTH_KEY_UNREGISTERED в blacklist сессии для user {user_id}")
+                await db.update_auth_status(user_id, "blacklist", False)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ <b>Сессия авторизации не найдена</b>\n\n"
+                        "Telegram аннулировал сессию поиска в чёрном списке.\n"
+                        "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                    ),
+                    parse_mode="HTML",
+                )
+                return
+
+        if result["found"]:
+            info = result.get("extracted_info", {})
+            username_info = info.get("username", "—")
+            phone = info.get("phone", "—")
+            found_user_id = info.get("user_id", "—")
+            message_link = result.get("message_link", "—")
+            chat = result.get("chat", "—")
+            raw_text = result.get("message_text", "")
+            msg_text = raw_text[:3800] + "...\n[текст обрезан]" if len(raw_text) > 3800 else raw_text
+            text = (
+                "⚠️ <b>Пользователь найден в черном списке!</b>\n\n"
+                f"<b>Username:</b> {username_info}\n"
+                f"<b>Телефон:</b> {phone}\n"
+                f"<b>User ID:</b> {found_user_id}\n\n"
+                #f"<b>Чат ЧС:</b> {chat}\n"
+                #f"<b>Ссылка на сообщение:</b>\n{message_link}\n\n"
+                f"<b>Текст записи:</b>\n<i>{msg_text}</i>"
+            )
+        else:
+            text = (
+                "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
+                f"<b>Username:</b> {username}\n"
+                f"<b>Проверено сообщений:</b> {result.get('messages_checked', 0)}\n"
+                f"<b>Проверено чатов:</b> {len(result.get('chats_checked', []))}"
+            )
+
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка фонового поиска в ЧС для user {user_id}: {e}")
+
+        is_auth_error = False
+        try:
+            detail = e.response.json().get("detail", "").lower()
+            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
+        except Exception:
+            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+
+        if is_auth_error:
+            await db.update_auth_status(user_id, "blacklist", False)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ <b>Авторизация оборвана</b>\n\n"
+                    "Произошла ошибка со стороны Telegram.\n"
+                    "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Ошибка проверки:\n\n{str(e)}"
+            )
+
+
 async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен username - проверяем в ЧС"""
+    """Получен username - запускаем поиск в ЧС в фоне"""
     username = update.message.text.strip()
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # Валидация username
     valid, normalized_username, error = Validators.validate_username(username)
@@ -121,74 +210,27 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return BlacklistState.WAITING_USERNAME
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
-
-    # Путь к blacklist-сессии в контексте workers-service контейнера
+    db: DatabaseService = context.bot_data["db"]
     blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
-    try:
-        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
+    # Сразу сообщаем пользователю и освобождаем бота
+    await update.message.reply_text(
+        f"🔍 Поиск <b>{normalized_username}</b> в чёрном списке запущен.\n\n"
+        "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
+        parse_mode="HTML",
+    )
 
-        if result["found"]:
-            # Найден в ЧС
-            info = result.get("extracted_info", {})
-            username_info = info.get("username", "—")
-            phone = info.get("phone", "—")
-            user_id = info.get("user_id", "—")
-
-            message_link = result.get("message_link", "—")
-            chat = result.get("chat", "—")
-
-            text = (
-                "⚠️ <b>Пользователь найден в черном списке!</b>\n\n"
-                f"<b>Username:</b> {username_info}\n"
-                f"<b>Телефон:</b> {phone}\n"
-                f"<b>User ID:</b> {user_id}\n\n"
-                f"<b>Чат ЧС:</b> {chat}\n"
-                f"<b>Ссылка на сообщение:</b>\n{message_link}\n\n"
-                f"<b>Текст записи:</b>\n<i>{result.get('message_text', '')[:200]}...</i>"
-            )
-        else:
-            # Не найден
-            text = (
-                "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
-                f"<b>Username:</b> {username}\n"
-                f"<b>Проверено сообщений:</b> {result.get('messages_checked', 0)}\n"
-                f"<b>Проверено чатов:</b> {len(result.get('chats_checked', []))}"
-            )
-
-        await update.message.reply_text(text, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"Ошибка проверки ЧС: {e}")
-
-        # Определяем: ошибка авторизации или другая?
-        is_auth_error = False
-        try:
-            detail = e.response.json().get("detail", "").lower()
-            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
-        except Exception:
-            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
-
-        if is_auth_error:
-            logger.warning(f"Обнаружен обрыв авторизации blacklist для user {update.effective_user.id}")
-
-            # Сбросить статус авторизации в БД
-            db: DatabaseService = context.bot_data["db"]
-            await db.update_auth_status(update.effective_user.id, "blacklist", False)
-
-            # Очистить данные пользователя
-            context.user_data.clear()
-
-            await update.message.reply_text(
-                "⚠️ <b>Авторизация оборвана</b>\n\n"
-                "Произошла ошибка со стороны Telegram.\n"
-                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
-                parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Ошибка проверки:\n\n{str(e)}"
-            )
+    # Запускаем поиск в фоне
+    asyncio.create_task(_blacklist_search_task(
+        bot=context.bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+        normalized_username=normalized_username,
+        workers_api=workers_api,
+        db=db,
+        blacklist_session_path=blacklist_session_path,
+    ))
 
     return ConversationHandler.END
 
@@ -514,5 +556,6 @@ def register_blacklist_handlers(app):
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
         conversation_timeout=300,
+        allow_reentry=True,
     )
     app.add_handler(check_user_conv)

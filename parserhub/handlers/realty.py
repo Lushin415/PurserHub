@@ -34,7 +34,7 @@ class RealtyBtn:
     AVITO = "🟦 Avito"
     CIAN = "🟩 Cian"
     BOTH = "🔀 Avito + Cian"
-    MY_TASKS = "📋 Задачи парсинга"
+    MY_TASKS = "📋 Задачи мониторинга"
     CONFIRM = "✅ Запустить"
 
 
@@ -56,8 +56,8 @@ async def show_realty_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ], resize_keyboard=True)
 
     text = (
-        "🏠 <b>Парсинг недвижимости</b>\n\n"
-        "Выберите источник для парсинга:"
+        "🏠 <b>Мониторинг недвижимости</b>\n\n"
+        "Выберите источник для мониторинга:"
     )
 
     if update.callback_query:
@@ -80,7 +80,7 @@ async def start_parsing_select_source(update: Update, context: ContextTypes.DEFA
         if not await sub_service.has_active(user_id):
             await update.message.reply_text(
                 "🔒 <b>Требуется подписка</b>\n\n"
-                "Для запуска парсинга недвижимости необходима активная подписка.\n"
+                "Для запуска мониторинга недвижимости необходима активная подписка.\n"
                 "Перейдите в «💳 Подписка» для оформления.",
                 parse_mode="HTML",
             )
@@ -102,16 +102,16 @@ async def start_parsing_select_source(update: Update, context: ContextTypes.DEFA
 
     if context.user_data["realty_source"] == "both":
         text = (
-            f"🏠 <b>Парсинг: {source_name}</b>\n\n"
+            f"🏠 <b>Мониторинг: {source_name}</b>\n\n"
             "⚠️ <b>ОБЯЗАТЕЛЬНО УСТАНОВИТЕ СОРТИРОВКУ ПО ДАТЕ</b>\n\n"
             "Введите ссылку на Avito:\n"
             "<code>https://www.avito.ru/moskva/...</code>"
         )
     else:
         text = (
-            f"🏠 <b>Парсинг: {source_name}</b>\n\n"
+            f"🏠 <b>Мониторинг: {source_name}</b>\n\n"
             "⚠️ <b>ОБЯЗАТЕЛЬНО УСТАНОВИТЕ СОРТИРОВКУ ПО ДАТЕ</b>\n\n"
-            "Введите ссылку для парсинга:\n"
+            "Введите ссылку для мониторинга:\n"
             f"<code>https://{source_name.lower()}.ru/...</code>"
         )
 
@@ -215,15 +215,14 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     db: DatabaseService = context.bot_data["db"]
     realty_api: RealtyAPI = context.bot_data["realty_api"]
 
-    # Проверка: у пользователя уже есть запущенная задача?
-    all_tasks = await db.get_user_tasks(user_id)
-    running = [t for t in all_tasks if t.status == "running"]
+    # Проверка: у пользователя уже есть запущенная задача парсинга недвижимости?
+    realty_tasks = await db.get_user_tasks(user_id, service="realty")
+    running = [t for t in realty_tasks if t.status == "running"]
     if running:
         task = running[0]
-        service_name = "мониторинг ПВЗ" if task.service == "workers" else "парсинг недвижимости"
         await update.message.reply_text(
             "⚠️ <b>Нельзя запустить</b>\n\n"
-            f"У вас уже запущена задача: <b>{service_name}</b>\n"
+            f"У вас уже запущена задача: <b>мониторинг недвижимости</b>\n"
             f"Task ID: <code>{task.task_id[:8]}...</code>\n\n"
             "Остановите текущую задачу перед запуском новой.",
             parse_mode="HTML",
@@ -274,10 +273,10 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         await show_main_menu(update, context)
 
-        logger.info(f"Парсинг запущен: user={user_id}, task={task_id}, type={task_type}")
+        logger.info(f"Мониторинг запущен: user={user_id}, task={task_id}, type={task_type}")
 
     except Exception as e:
-        logger.error(f"Ошибка запуска парсинга: {e}")
+        logger.error(f"Ошибка запуска мониторинга: {e}")
 
         # Определяем: ошибка авторизации или другая?
         is_auth_error = False
@@ -299,7 +298,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             )
         else:
             await update.message.reply_text(
-                f"❌ Ошибка запуска парсинга:\n\n{str(e)}"
+                f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
             )
         await show_main_menu(update, context)
 
@@ -319,7 +318,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = (
             "📋 <b>Мои задачи</b>\n\n"
-            "У вас нет активных задач парсинга."
+            "У вас нет активных задач мониторинга."
         )
 
         if update.callback_query:
@@ -351,7 +350,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
-        f"📋 <b>Мои задачи парсинга</b> ({len(tasks)})\n\n"
+        f"📋 <b>Мои задачи мониторинга</b> ({len(tasks)})\n\n"
         "Выберите задачу для просмотра:"
     )
 
@@ -409,7 +408,7 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.answer()
             await query.edit_message_text(
-                f"📊 <b>Статус парсинга</b>\n\n"
+                f"📊 <b>Статус мониторинга</b>\n\n"
                 f"<b>Task ID:</b> <code>{task_id}</code>\n"
                 f"<b>Статус:</b> {task_status}\n\n"
                 f"<b>Прогресс:</b>\n"
@@ -452,7 +451,7 @@ async def stop_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await realty_api.stop_parsing(task_id)
         await db.delete_task(task_id)
 
-        await query.answer("✅ Парсинг остановлен")
+        await query.answer("✅ Мониторинг остановлен")
         await show_my_tasks(update, context)
 
     except Exception as e:
@@ -510,9 +509,9 @@ async def cancel_realty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     """Отмена настройки парсинга"""
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text("❌ Настройка парсинга отменена.")
+        await update.callback_query.edit_message_text("❌ Настройка мониторинга отменена.")
     else:
-        await update.message.reply_text("❌ Настройка парсинга отменена.")
+        await update.message.reply_text("❌ Настройка мониторинга отменена.")
     return ConversationHandler.END
 
 
@@ -560,5 +559,6 @@ def register_realty_handlers(app):
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
         conversation_timeout=300,
+        allow_reentry=True,
     )
     app.add_handler(parsing_conv)

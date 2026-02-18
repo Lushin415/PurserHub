@@ -24,6 +24,7 @@ from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
 # Состояния для ConversationHandler
 class WorkersState:
     SELECT_MODE = 1
+    INPUT_CITY = 2
     INPUT_DATE_FROM = 3
     INPUT_DATE_TO = 4
     INPUT_MIN_PRICE = 5
@@ -39,11 +40,15 @@ class WorkersBtn:
     MODE_WORKER = "👷 Работники"
     MODE_EMPLOYER = "🏢 Работодатели"
     CONFIRM = "✅ Запустить"
+    CITY_MSK = "🏙 Москва"
+    CITY_SPB = "🌊 Санкт-Петербург"
+    CITY_ALL = "🌍 Все источники"
 
 
 # Callback data (только для inline-кнопок: задачи, уведомления)
 class WorkersCB:
     WORKERS_MENU = "workers_menu"
+    MY_TASKS = "my_worker_tasks"
     VIEW_TASK = "view_worker_task_"
     STOP_TASK = "stop_worker_task_"
     STOP_ALL_TASKS = "stop_all_worker_tasks"
@@ -127,7 +132,7 @@ async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEF
 
 
 async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен режим - сразу переходим к датам (чаты берутся из глобальных настроек)"""
+    """Получен режим - переходим к выбору города"""
     text = update.message.text.strip()
     mode = "worker" if text == WorkersBtn.MODE_WORKER else "employer"
     context.user_data["workers_mode"] = mode
@@ -135,14 +140,49 @@ async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     mode_name = "Работники" if mode == "worker" else "Работодатели"
 
     keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(WorkersBtn.CITY_MSK), KeyboardButton(WorkersBtn.CITY_SPB)],
+        [KeyboardButton(WorkersBtn.CITY_ALL)],
         [KeyboardButton(MenuButton.CANCEL)],
     ], resize_keyboard=True)
 
     await update.message.reply_text(
         f"👷 <b>Режим: {mode_name}</b>\n\n"
+        "🏙 <b>Выберите город для мониторинга:</b>\n\n"
+        "⚠️ При выборе конкретного города поиск происходит только в чатах, "
+        "где указан этот город в названии топика. "
+        "Общие чаты без указания города исключаются из поиска.",
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+    return WorkersState.INPUT_CITY
+
+
+async def receive_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получен город - переходим к датам"""
+    text = update.message.text.strip()
+
+    city_map = {
+        WorkersBtn.CITY_MSK: "МСК",
+        WorkersBtn.CITY_SPB: "СПБ",
+        WorkersBtn.CITY_ALL: "ALL",
+    }
+
+    if text not in city_map:
+        await update.message.reply_text("❌ Пожалуйста, выберите город из предложенных вариантов.")
+        return WorkersState.INPUT_CITY
+
+    context.user_data["workers_city"] = city_map[text]
+
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
+
+    await update.message.reply_text(
         "📅 Фильтр по датам\n\n"
-        "Введите дату начала (формат: YYYY-MM-DD):\n"
-        "<code>2026-12-31</code>",
+        "Фильтр по датам нужен для определения предполагаемой даты выхода сотрудника на работу\n\n"
+        "Введите дату начала (формат: ДД.ММ.ГГГГ):\n"
+        "<code>31.12.2026</code>",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -160,10 +200,10 @@ async def receive_date_from(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(error)
         return WorkersState.INPUT_DATE_FROM
 
-    context.user_data["workers_date_from"] = date_str
+    context.user_data["workers_date_from"] = dt.strftime("%Y-%m-%d")
 
     await update.message.reply_text(
-        "📅 Введите дату окончания (формат: YYYY-MM-DD):",
+        "📅 Введите дату окончания (формат: ДД.ММ.ГГГГ):",
     )
 
     return WorkersState.INPUT_DATE_TO
@@ -180,14 +220,17 @@ async def receive_date_to(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(error)
         return WorkersState.INPUT_DATE_TO
 
-    # Валидация диапазона
+    # Валидация диапазона (date_from хранится в ISO YYYY-MM-DD)
     if date_from:
-        valid_range, error_range = Validators.validate_date_range(date_from, date_str)
-        if not valid_range:
-            await update.message.reply_text(error_range)
+        dt_from = datetime.strptime(date_from, "%Y-%m-%d")
+        if dt_from > dt:
+            await update.message.reply_text("❌ Дата начала не может быть позже даты окончания")
+            return WorkersState.INPUT_DATE_TO
+        if (dt - dt_from).days > 365:
+            await update.message.reply_text("❌ Диапазон дат слишком большой (максимум 365 дней)")
             return WorkersState.INPUT_DATE_TO
 
-    context.user_data["workers_date_to"] = date_str
+    context.user_data["workers_date_to"] = dt.strftime("%Y-%m-%d")
 
     return await ask_prices(update, context)
 
@@ -263,6 +306,7 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     date_to = context.user_data.get("workers_date_to")
     min_price = context.user_data.get("workers_min_price")
     max_price = context.user_data.get("workers_max_price")
+    city = context.user_data.get("workers_city", "ALL")
 
     # Чаты берутся из глобальных настроек (задаются администратором)
     db: DatabaseService = context.bot_data["db"]
@@ -271,9 +315,16 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     mode_name = "Работники" if mode == "worker" else "Работодатели"
     chats_str = "\n".join([f"• {chat}" for chat in chats]) if chats else "Настраиваются администратором"
 
+    city_labels = {"МСК": "🏙 Москва", "СПБ": "🌊 Санкт-Петербург", "ALL": "🌍 Все источники"}
+    city_str = city_labels.get(city, "🌍 Все источники")
+
     filters_text = []
+    filters_text.append(f"🏙 Город: {city_str}")
     if date_from and date_to:
-        filters_text.append(f"📅 Даты: {date_from} — {date_to}")
+        from datetime import datetime as _dt
+        df_display = _dt.strptime(date_from, "%Y-%m-%d").strftime("%d.%m.%Y")
+        dt_display = _dt.strptime(date_to, "%Y-%m-%d").strftime("%d.%m.%Y")
+        filters_text.append(f"📅 Даты: {df_display} — {dt_display}")
     if min_price or max_price:
         price_range = f"{min_price or 0} — {max_price or '∞'}"
         filters_text.append(f"💰 Цена: {price_range}")
@@ -287,7 +338,7 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = (
         "📋 <b>Подтверждение запуска</b>\n\n"
         f"<b>Режим:</b> {mode_name}\n\n"
-        f"<b>Чаты:</b>\n{chats_str}\n\n"
+        #f"<b>Чаты:</b>\n{chats_str}\n\n"
         f"<b>Фильтры:</b>\n{filters_str}\n\n"
         "Запустить мониторинг?"
     )
@@ -306,15 +357,14 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     session_mgr: SessionManager = context.bot_data["session_manager"]
     workers_api: WorkersAPI = context.bot_data["workers_api"]
 
-    # Проверка: у пользователя уже есть запущенная задача?
-    all_tasks = await db.get_user_tasks(user_id)
-    running = [t for t in all_tasks if t.status == "running"]
+    # Проверка: у пользователя уже есть запущенная задача мониторинга ПВЗ?
+    workers_tasks = await db.get_user_tasks(user_id, service="workers")
+    running = [t for t in workers_tasks if t.status == "running"]
     if running:
         task = running[0]
-        service_name = "мониторинг ПВЗ" if task.service == "workers" else "парсинг недвижимости"
         await update.message.reply_text(
             "⚠️ <b>Нельзя запустить</b>\n\n"
-            f"У вас уже запущена задача: <b>{service_name}</b>\n"
+            f"У вас уже запущена задача: <b>мониторинг ПВЗ</b>\n"
             f"Task ID: <code>{task.task_id[:8]}...</code>\n\n"
             "Остановите текущую задачу перед запуском новой.",
             parse_mode="HTML",
@@ -343,6 +393,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     date_to = context.user_data.get("workers_date_to")
     min_price = context.user_data.get("workers_min_price")
     max_price = context.user_data.get("workers_max_price")
+    city = context.user_data.get("workers_city", "ALL")
 
     filters = {
         "date_from": date_from,
@@ -350,6 +401,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "min_price": min_price,
         "max_price": max_price,
         "shk_filter": "любое",
+        "city_filter": city,
     }
 
     try:
@@ -672,6 +724,9 @@ def register_workers_handlers(app):
         filters.Regex(f"^{WorkersBtn.MY_TASKS}$"), show_my_tasks
     ))
 
+    # Inline callback: список задач (кнопка "Назад" из просмотра задачи)
+    app.add_handler(CallbackQueryHandler(show_my_tasks, pattern=f"^{WorkersCB.MY_TASKS}$"))
+
     # Inline callback: просмотр и управление задачами (остаются inline)
     app.add_handler(CallbackQueryHandler(view_task, pattern=f"^{WorkersCB.VIEW_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_task, pattern=f"^{WorkersCB.STOP_TASK}"))
@@ -692,6 +747,14 @@ def register_workers_handlers(app):
                 MessageHandler(
                     filters.Regex(f"^({WorkersBtn.MODE_WORKER}|{WorkersBtn.MODE_EMPLOYER})$"),
                     receive_mode
+                ),
+            ],
+            WorkersState.INPUT_CITY: [
+                MessageHandler(
+                    filters.Regex(
+                        f"^({WorkersBtn.CITY_MSK}|{WorkersBtn.CITY_SPB}|{WorkersBtn.CITY_ALL})$"
+                    ),
+                    receive_city
                 ),
             ],
             WorkersState.INPUT_DATE_FROM: [
@@ -715,5 +778,6 @@ def register_workers_handlers(app):
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
         conversation_timeout=300,
+        allow_reentry=True,
     )
     app.add_handler(monitoring_conv)

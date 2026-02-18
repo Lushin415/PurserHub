@@ -252,6 +252,13 @@ class DatabaseService:
             await db.execute("DELETE FROM active_tasks WHERE task_id = ?", (task_id,))
             await db.commit()
 
+    async def clear_running_tasks(self) -> int:
+        """Удалить все задачи со статусом running (вызывается при shutdown)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("DELETE FROM active_tasks WHERE status = 'running'")
+            await db.commit()
+            return cursor.rowcount
+
     # ===== Администраторы =====
 
     async def is_admin(self, user_id: int) -> bool:

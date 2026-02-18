@@ -57,7 +57,7 @@ async def show_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     else:
         keyboard.append([
-            InlineKeyboardButton("🔓 Отключить парсер ПВЗ", callback_data=AuthCB.DISCONNECT_PARSER)
+            InlineKeyboardButton("🔓 Отключить поисковик ПВЗ", callback_data=AuthCB.DISCONNECT_PARSER)
         ])
 
     # Авторизация Черного списка
@@ -83,9 +83,9 @@ async def show_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👤 <b>Мой аккаунт</b>\n\n"
         f"<b>Статус подключений:</b>\n"
-        f"👷 Парсер ПВЗ: {parser_status}\n"
+        f"👷 Поиск работников и работодателей ПВЗ: {parser_status}\n"
         f"⚫ Черный список: {blacklist_status}\n\n"
-        "Для работы с мониторингом и черным списком необходимо авторизовать Telegram аккаунт."
+        "Для работы с поиском и черным списком необходимо авторизовать Telegram аккаунт."
     )
 
     if update.callback_query:
@@ -117,7 +117,8 @@ async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.edit_message_text(
         f"🔑 <b>Авторизация: {session_name}</b>\n\n"
         f"Введите номер телефона в формате:\n"
-        f"<code>+79991234567</code>",
+        f"<code>+79991234567</code>\n\n"
+        f"<b>❗️ВАЖНО:</b> После успешной авторизации Telegram пришлёт уведомление о новом входе — это нормально, вы сами разрешили боту доступ. Нажмите <b>«Да, это я»</b>.",
         reply_markup=reply_markup,
         parse_mode="HTML",
     )
@@ -163,10 +164,8 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
             await update.message.reply_text(
                 "📱 Код отправлен в Telegram!\n\n"
-                "⚠️ ВАЖНО: НЕ открывайте уведомление в Telegram!\n"
-                "Просто запомните или скопируйте код.\n\n"
                 "Введите код ЧЕРЕЗ ПРОБЕЛЫ:\n"
-                "Например: 1 2 3 4 5",
+                "Например: 1 2 3 4 5 или 1 2 345",
                 reply_markup=reply_markup,
             )
             return AuthState.WAITING_CODE
@@ -302,7 +301,7 @@ async def disconnect_parser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await session_mgr.delete_session(user_id, "parser")
     await db.update_auth_status(user_id, "parser", False)
 
-    await update.callback_query.answer("Парсер ПВЗ отключён")
+    await update.callback_query.answer("Поисковик ПВЗ отключён")
     await show_account_menu(update, context)
 
 
@@ -364,6 +363,7 @@ def register_auth_handlers(app):
             MessageHandler(MAIN_MENU_FILTER, cancel_and_return_to_menu),
         ],
         conversation_timeout=300,
+        allow_reentry=True,
     )
     app.add_handler(auth_conv)
 
