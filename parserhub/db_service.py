@@ -263,6 +263,16 @@ class DatabaseService:
             await db.execute("DELETE FROM active_tasks WHERE task_id = ?", (task_id,))
             await db.commit()
 
+    async def get_all_running_tasks(self) -> list[ActiveTask]:
+        """Получить все задачи со статусом running (для reconcile при старте)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM active_tasks WHERE status = 'running' ORDER BY created_at DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [ActiveTask(**dict(row)) for row in rows]
+
     async def clear_running_tasks(self) -> int:
         """Удалить все задачи со статусом running (вызывается при shutdown)"""
         async with aiosqlite.connect(self.db_path) as db:
