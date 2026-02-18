@@ -35,22 +35,94 @@ docker compose ps
 
 ## 2. Запуск на сервере в Docker
 
-Всё то же самое, что и локально. Дополнительно:
+### Шаг 1 — Установка Docker (Ubuntu/Debian)
 
 ```bash
-# Клонируйте все три репозитория рядом:
-# /opt/scanbot/PurserHub/
-# /opt/scanbot/workers_service/
-# /opt/scanbot/parser_avito_cian/
+# Обновить систему
+sudo apt update && sudo apt upgrade -y
 
-# Запуск из директории PurserHub:
-cd /opt/scanbot/PurserHub
-cp .env.example .env
-# ... заполните .env ...
-docker compose up -d
+# Установить зависимости
+sudo apt install -y curl git ca-certificates gnupg
+
+# Добавить официальный репозиторий Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Установить Docker и плагин Compose
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Добавить текущего пользователя в группу docker (чтобы не нужен sudo)
+sudo usermod -aG docker $USER
+
+# Применить изменения группы без перезахода
+newgrp docker
+
+# Проверить установку
+docker --version
+docker compose version
 ```
 
-Убедитесь, что пути к соседним сервисам в `docker-compose.yml` указывают на правильные директории.
+### Шаг 2 — Клонировать репозитории
+
+Все три репозитория должны лежать **рядом** в одной директории — это требование `docker-compose.yml`.
+
+```bash
+# Создать рабочую директорию
+mkdir -p /opt/scanbot && cd /opt/scanbot
+
+# Клонировать все три репозитория
+git clone https://github.com/ВАШ_АККАУНТ/PurserHub.git
+git clone https://github.com/ВАШ_АККАУНТ/workers_service.git
+git clone https://github.com/ВАШ_АККАУНТ/parser_avito_cian.git
+
+# Должна получиться такая структура:
+# /opt/scanbot/
+# ├── PurserHub/
+# ├── workers_service/
+# └── parser_avito_cian/
+```
+
+### Шаг 3 — Создать .env файлы
+
+```bash
+# PurserHub
+cd /opt/scanbot/PurserHub
+cp .env.example .env
+nano .env   # заполните BOT_TOKEN, ADMIN_ID, API_ID, API_HASH
+
+# workers_service
+cd /opt/scanbot/workers_service
+cp .env.example .env
+nano .env   # заполните API_ID, API_HASH (те же, что в PurserHub)
+```
+
+### Шаг 4 — Создать пустые файлы для realty-monitor
+
+```bash
+# Docker монтирует эти файлы как volumes — они должны существовать до запуска
+touch /opt/scanbot/parser_avito_cian/cookies.json
+touch /opt/scanbot/parser_avito_cian/cookies_cian.json
+touch /opt/scanbot/parser_avito_cian/database.db
+mkdir -p /opt/scanbot/parser_avito_cian/logs
+mkdir -p /opt/scanbot/parser_avito_cian/result
+mkdir -p /opt/scanbot/workers_service/data/db
+mkdir -p /opt/scanbot/workers_service/data/logs
+```
+
+### Шаг 5 — Запустить
+
+```bash
+cd /opt/scanbot/PurserHub
+docker compose up -d
+
+# Проверить, что все три контейнера запущены
+docker compose ps
+```
 
 ---
 
