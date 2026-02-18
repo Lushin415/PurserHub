@@ -50,6 +50,7 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service: SubscriptionService = context.bot_data["subscription"]
 
     info = await service.get_info(user_id)
+    trial = await service.get_trial_info(user_id)
 
     if info:
         active_until = datetime.fromisoformat(info["active_until"])
@@ -59,7 +60,7 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             hours_left = remaining.seconds // 3600
 
             status_text = (
-                f"<b>Статус:</b> Активна\n"
+                f"<b>Статус:</b> ✅ Активна\n"
                 f"<b>Тариф:</b> {info['plan']}\n"
                 f"<b>Действует до:</b> {active_until.strftime('%d.%m.%Y %H:%M')} UTC\n"
                 f"<b>Осталось:</b> {days_left} дн. {hours_left} ч.\n\n"
@@ -70,6 +71,22 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<b>Статус:</b> Истекла\n\n"
                 "Выберите тариф для активации:"
             )
+    elif trial and trial["is_active"]:
+        trial_until = datetime.fromisoformat(trial["trial_until"])
+        remaining = trial_until - datetime.utcnow()
+        days_left = remaining.days
+        hours_left = remaining.seconds // 3600
+        status_text = (
+            f"<b>Статус:</b> 🎁 Пробный период\n"
+            f"<b>Действует до:</b> {trial_until.strftime('%d.%m.%Y %H:%M')} UTC\n"
+            f"<b>Осталось:</b> {days_left} дн. {hours_left} ч.\n\n"
+            "После окончания пробного периода для продолжения работы оформите подписку:"
+        )
+    elif trial and not trial["is_active"]:
+        status_text = (
+            "<b>Статус:</b> Пробный период истёк\n\n"
+            "Выберите тариф для активации:"
+        )
     else:
         status_text = (
             "<b>Статус:</b> Не активна\n\n"
