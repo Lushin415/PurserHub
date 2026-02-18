@@ -20,6 +20,7 @@ from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER
 # Состояния для ConversationHandler
 class BlacklistState:
     WAITING_USERNAME = 1
+    WAITING_FIO = 4
     WAITING_ADD_CHAT = 2
     WAITING_SELECT_TOPIC = 3
 
@@ -37,6 +38,7 @@ class BlacklistCB:
 # Reply-кнопки подменю
 class BlacklistBtn:
     CHECK = "🔍 Проверить пользователя"
+    SKIP_FIO = "⏩ Пропустить"
 
 
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,13 +113,14 @@ async def _blacklist_search_task(
     user_id: int,
     username: str,
     normalized_username: str,
+    fio: str | None,
     workers_api: WorkersAPI,
     db: DatabaseService,
     blacklist_session_path: str,
 ):
     """Фоновая задача поиска в ЧС — выполняется без блокировки бота"""
     try:
-        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path)
+        result = await workers_api.check_blacklist(normalized_username, blacklist_session_path, fio=fio)
 
         # Проверяем ошибку авторизации в теле ответа
         if not result.get("found") and result.get("error"):
@@ -141,25 +144,34 @@ async def _blacklist_search_task(
             username_info = info.get("username", "—")
             phone = info.get("phone", "—")
             found_user_id = info.get("user_id", "—")
-            message_link = result.get("message_link", "—")
-            chat = result.get("chat", "—")
             raw_text = result.get("message_text", "")
             msg_text = raw_text[:3800] + "...\n[текст обрезан]" if len(raw_text) > 3800 else raw_text
+
+            match_type = result.get("match_type", "")
+            match_labels = {
+                "username": "по никнейму",
+                "user_id": "по User ID (ник был сменён)",
+                "fio": "по ФИО",
+            }
+            match_label = match_labels.get(match_type, "")
+
             text = (
-                "⚠️ <b>Пользователь найден в черном списке!</b>\n\n"
+                f"⚠️ <b>Пользователь найден в черном списке!</b>\n"
+                f"<i>Найден {match_label}</i>\n\n"
                 f"<b>Username:</b> {username_info}\n"
                 f"<b>Телефон:</b> {phone}\n"
                 f"<b>User ID:</b> {found_user_id}\n\n"
-                #f"<b>Чат ЧС:</b> {chat}\n"
-                #f"<b>Ссылка на сообщение:</b>\n{message_link}\n\n"
                 f"<b>Текст записи:</b>\n<i>{msg_text}</i>"
             )
         else:
+            steps = result.get("steps_done", ["по никнейму"])
+            steps_text = ", ".join(steps)
             text = (
                 "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
                 f"<b>Username:</b> {username}\n"
-                f"<b>Проверено сообщений:</b> {result.get('messages_checked', 0)}\n"
-                f"<b>Проверено чатов:</b> {len(result.get('chats_checked', []))}"
+                f"<b>Проверено:</b> {steps_text}\n"
+                f"<b>Сообщений проверено:</b> {result.get('messages_checked', 0)}\n"
+                f"<b>Чатов проверено:</b> {len(result.get('chats_checked', []))}"
             )
 
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
@@ -193,12 +205,9 @@ async def _blacklist_search_task(
 
 
 async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен username - запускаем поиск в ЧС в фоне"""
+    """Получен username — валидируем и просим ввести ФИО"""
     username = update.message.text.strip()
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
 
-    # Валидация username
     valid, normalized_username, error = Validators.validate_username(username)
     if not valid:
         await update.message.reply_text(
@@ -209,24 +218,58 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return BlacklistState.WAITING_USERNAME
 
+    context.user_data["bl_username"] = normalized_username
+
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(BlacklistBtn.SKIP_FIO)],
+        [KeyboardButton(MenuButton.CANCEL)],
+    ], resize_keyboard=True)
+
+    await update.message.reply_text(
+        f"✅ Никнейм: <b>{normalized_username}</b>\n\n"
+        "Введите ФИО для поиска:\n"
+        "<i>Иванов Иван Иванович</i>\n"
+        "или <i>Иванов Иван</i>, или только <i>Иванов</i>\n\n"
+        "Если ФИО неизвестно — нажмите «⏩ Пропустить»",
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+    return BlacklistState.WAITING_FIO
+
+
+async def receive_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получен ФИО (или пропуск) — запускаем поиск в ЧС в фоне"""
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    normalized_username = context.user_data.pop("bl_username", None)
+    if not normalized_username:
+        await update.message.reply_text("❌ Ошибка сессии. Начните заново.")
+        return ConversationHandler.END
+
+    fio = None if text == BlacklistBtn.SKIP_FIO else text
+
     workers_api: WorkersAPI = context.bot_data["workers_api"]
     db: DatabaseService = context.bot_data["db"]
     blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
-    # Сразу сообщаем пользователю и освобождаем бота
+    fio_line = f"\n<b>ФИО:</b> {fio}" if fio else ""
     await update.message.reply_text(
-        f"🔍 Поиск <b>{normalized_username}</b> в чёрном списке запущен.\n\n"
+        f"🔍 Поиск запущен:\n"
+        f"<b>Никнейм:</b> {normalized_username}{fio_line}\n\n"
         "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
         parse_mode="HTML",
     )
 
-    # Запускаем поиск в фоне
     asyncio.create_task(_blacklist_search_task(
         bot=context.bot,
         chat_id=chat_id,
         user_id=user_id,
-        username=username,
+        username=normalized_username,
         normalized_username=normalized_username,
+        fio=fio,
         workers_api=workers_api,
         db=db,
         blacklist_session_path=blacklist_session_path,
@@ -549,6 +592,9 @@ def register_blacklist_handlers(app):
         states={
             BlacklistState.WAITING_USERNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_username)
+            ],
+            BlacklistState.WAITING_FIO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_fio)
             ],
         },
         fallbacks=[
