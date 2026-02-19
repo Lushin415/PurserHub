@@ -235,6 +235,7 @@ class RealtyAPI:
         cian_url: Optional[str] = None,
         notification_bot_token: Optional[str] = None,
         notification_chat_id: Optional[int] = None,
+        pause_notification_chat_id: Optional[int] = None,
     ) -> dict:
         """POST /parse/start - Запуск мониторинга недвижимости (уведомления через основной PurserHub бот)"""
         url = f"{self.base_url}/parse/start"
@@ -251,6 +252,8 @@ class RealtyAPI:
             payload["notification_bot_token"] = notification_bot_token
         if notification_chat_id:
             payload["notification_chat_id"] = notification_chat_id
+        if pause_notification_chat_id:
+            payload["pause_notification_chat_id"] = pause_notification_chat_id
 
         try:
             response = await self.client.post(url, json=payload)
@@ -286,6 +289,20 @@ class RealtyAPI:
             return response.json()
         except httpx.HTTPError as e:
             logger.error(f"Ошибка получения статуса мониторинга {task_id}: {e}")
+            raise
+
+    async def resume_parsing(self, task_id: str) -> dict:
+        """POST /parse/resume/{task_id} - Возобновить приостановленный мониторинг"""
+        url = f"{self.base_url}/parse/resume/{task_id}"
+
+        try:
+            response = await self.client.post(url)
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Мониторинг возобновлён: {task_id}")
+            return data
+        except httpx.HTTPError as e:
+            logger.error(f"Ошибка возобновления мониторинга {task_id}: {e}")
             raise
 
     async def get_proxy(self) -> dict:

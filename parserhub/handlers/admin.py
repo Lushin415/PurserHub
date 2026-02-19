@@ -1,6 +1,6 @@
 """Административная панель"""
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
@@ -139,8 +139,8 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         lines = []
         for s in subs[:30]:
-            until = datetime.fromisoformat(s["active_until"])
-            remaining = until - datetime.utcnow()
+            until = datetime.fromisoformat(s["active_until"]).replace(tzinfo=timezone.utc)
+            remaining = until - datetime.now(timezone.utc)
             name = s.get("username") or s.get("full_name") or "?"
             lines.append(
                 f"• <code>{s['user_id']}</code> @{name} — "
@@ -223,6 +223,7 @@ async def grant_sub_select_plan(update: Update, context: ContextTypes.DEFAULT_TY
         )
         logger.info(f"Admin granted subscription: user={user_id}, plan={plan}")
     except Exception as e:
+        logger.exception("Ошибка выдачи подписки")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
     return ConversationHandler.END
@@ -391,33 +392,46 @@ async def cancel_admin_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # ===== Управление чатами ПВЗ =====
 
-async def manage_pvz_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Меню управления чатами ПВЗ"""
+async def _manage_chats_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    db_key: str,
+    title: str,
+    edit_cb: str,
+    clear_cb: str,
+    return_state: int,
+) -> int:
+    """Универсальное меню управления списком чатов"""
     query = update.callback_query
     await query.answer()
 
     db: DatabaseService = context.bot_data["db"]
-    current_chats = await db.get_global_chats('pvz_monitoring_chats')
-
+    current_chats = await db.get_global_chats(db_key)
     chats_text = "\n".join([f"• {chat}" for chat in current_chats]) if current_chats else "Нет настроенных чатов"
 
-    text = (
-        "📝 <b>Чаты для мониторинга ПВЗ</b>\n\n"
-        f"<b>Текущие чаты:</b>\n{chats_text}"
-    )
-
     keyboard = [
-        [InlineKeyboardButton("✏️ Изменить список", callback_data=AdminCB.PVZ_CHATS_EDIT)],
-        [InlineKeyboardButton("🗑 Очистить список", callback_data=AdminCB.PVZ_CHATS_CLEAR)],
+        [InlineKeyboardButton("✏️ Изменить список", callback_data=edit_cb)],
+        [InlineKeyboardButton("🗑 Очистить список", callback_data=clear_cb)],
         [InlineKeyboardButton("❌ Закрыть", callback_data="admin_conv_cancel")],
     ]
     await query.edit_message_text(
-        text=text,
+        text=f"📝 <b>{title}</b>\n\n<b>Текущие чаты:</b>\n{chats_text}",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
+    return return_state
 
-    return AdminState.PVZ_CHATS_MENU
+
+async def manage_pvz_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Меню управления чатами ПВЗ"""
+    return await _manage_chats_menu(
+        update, context,
+        db_key="pvz_monitoring_chats",
+        title="Чаты для мониторинга ПВЗ",
+        edit_cb=AdminCB.PVZ_CHATS_EDIT,
+        clear_cb=AdminCB.PVZ_CHATS_CLEAR,
+        return_state=AdminState.PVZ_CHATS_MENU,
+    )
 
 
 async def pvz_chats_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -442,22 +456,39 @@ async def pvz_chats_edit_start(update: Update, context: ContextTypes.DEFAULT_TYP
     return AdminState.INPUT_PVZ_CHATS
 
 
-async def pvz_chats_clear_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Запросить подтверждение очистки чатов ПВЗ"""
+async def _chats_clear_confirm(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    title: str,
+    description: str,
+    confirm_cb: str,
+    return_state: int,
+) -> int:
+    """Универсальный диалог подтверждения очистки чатов"""
     query = update.callback_query
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("✅ Да, очистить", callback_data=AdminCB.PVZ_CHATS_CLEAR_OK)],
+        [InlineKeyboardButton("✅ Да, очистить", callback_data=confirm_cb)],
         [InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")],
     ]
     await query.edit_message_text(
-        "🗑 <b>Очистить чаты ПВЗ</b>\n\n"
-        "Вы уверены? Список чатов для мониторинга ПВЗ будет полностью очищен.",
+        f"🗑 <b>{title}</b>\n\n{description}",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
-    return AdminState.CONFIRM_CLEAR_PVZ
+    return return_state
+
+
+async def pvz_chats_clear_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запросить подтверждение очистки чатов ПВЗ"""
+    return await _chats_clear_confirm(
+        update, context,
+        title="Очистить чаты ПВЗ",
+        description="Вы уверены? Список чатов для мониторинга ПВЗ будет полностью очищен.",
+        confirm_cb=AdminCB.PVZ_CHATS_CLEAR_OK,
+        return_state=AdminState.CONFIRM_CLEAR_PVZ,
+    )
 
 
 async def pvz_chats_clear_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -509,31 +540,14 @@ async def receive_pvz_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def manage_blacklist_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Меню управления чатами ЧС"""
-    query = update.callback_query
-    await query.answer()
-
-    db: DatabaseService = context.bot_data["db"]
-    current_chats = await db.get_global_chats('blacklist_chats')
-
-    chats_text = "\n".join([f"• {chat}" for chat in current_chats]) if current_chats else "Нет настроенных чатов"
-
-    text = (
-        "📝 <b>Чаты для черного списка</b>\n\n"
-        f"<b>Текущие чаты:</b>\n{chats_text}"
+    return await _manage_chats_menu(
+        update, context,
+        db_key="blacklist_chats",
+        title="Чаты для черного списка",
+        edit_cb=AdminCB.BL_CHATS_EDIT,
+        clear_cb=AdminCB.BL_CHATS_CLEAR,
+        return_state=AdminState.BL_CHATS_MENU,
     )
-
-    keyboard = [
-        [InlineKeyboardButton("✏️ Изменить список", callback_data=AdminCB.BL_CHATS_EDIT)],
-        [InlineKeyboardButton("🗑 Очистить список", callback_data=AdminCB.BL_CHATS_CLEAR)],
-        [InlineKeyboardButton("❌ Закрыть", callback_data="admin_conv_cancel")],
-    ]
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
-
-    return AdminState.BL_CHATS_MENU
 
 
 async def bl_chats_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -559,20 +573,13 @@ async def bl_chats_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def bl_chats_clear_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Запросить подтверждение очистки чатов ЧС"""
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("✅ Да, очистить", callback_data=AdminCB.BL_CHATS_CLEAR_OK)],
-        [InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")],
-    ]
-    await query.edit_message_text(
-        "🗑 <b>Очистить чаты ЧС</b>\n\n"
-        "Вы уверены? Список чатов черного списка будет полностью очищен.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
+    return await _chats_clear_confirm(
+        update, context,
+        title="Очистить чаты ЧС",
+        description="Вы уверены? Список чатов черного списка будет полностью очищен.",
+        confirm_cb=AdminCB.BL_CHATS_CLEAR_OK,
+        return_state=AdminState.CONFIRM_CLEAR_BL,
     )
-    return AdminState.CONFIRM_CLEAR_BL
 
 
 async def bl_chats_clear_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -589,7 +596,7 @@ async def bl_chats_clear_execute(update: Update, context: ContextTypes.DEFAULT_T
     try:
         await workers_api.sync_blacklist_chats([])
     except Exception as e:
-        logger.error(f"Ошибка синхронизации очистки чатов ЧС с workers_service: {e}")
+        logger.exception("Ошибка синхронизации очистки чатов ЧС с workers_service")
 
     await query.edit_message_text(
         "✅ <b>Список чатов ЧС очищен.</b>",
@@ -633,7 +640,7 @@ async def receive_blacklist_chats(update: Update, context: ContextTypes.DEFAULT_
     try:
         await workers_api.sync_blacklist_chats(sync_chats)
     except Exception as e:
-        logger.error(f"Ошибка синхронизации чатов ЧС с workers_service: {e}")
+        logger.exception("Ошибка синхронизации чатов ЧС с workers_service")
 
     chats_list = "\n".join([f"• {chat}" for chat in normalized_chats])
 
@@ -684,7 +691,8 @@ async def proxy_settings_start(update: Update, context: ContextTypes.DEFAULT_TYP
         current = await realty_api.get_proxy()
         current_proxy = current.get("proxy_string", "") or "не задан"
         current_url = current.get("proxy_change_url", "") or "не задан"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Сервис недвижимости недоступен при запросе прокси: {e}")
         current_proxy = "⚠️ сервис недоступен"
         current_url = "⚠️ сервис недоступен"
 
@@ -757,6 +765,7 @@ async def proxy_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         logger.info(f"Admin {update.effective_user.id} удалил прокси")
     except Exception as e:
+        logger.exception("Ошибка удаления прокси")
         await query.edit_message_text(f"❌ Ошибка удаления прокси:\n{e}")
     return ConversationHandler.END
 
@@ -798,6 +807,7 @@ async def proxy_restart_execute(update: Update, context: ContextTypes.DEFAULT_TY
         )
         logger.info(f"Admin {update.effective_user.id} инициировал перезапуск realty-monitor")
     except Exception as e:
+        logger.exception("Ошибка перезапуска сервиса недвижимости")
         await query.edit_message_text(f"❌ Ошибка перезапуска:\n{e}")
     return ConversationHandler.END
 
@@ -863,6 +873,7 @@ async def proxy_skip_change_url(update: Update, context: ContextTypes.DEFAULT_TY
         )
         logger.info(f"Admin {query.from_user.id} updated proxy: {proxy_string[:20]}...")
     except Exception as e:
+        logger.exception("Ошибка сохранения прокси (proxy_skip_change_url)")
         await query.edit_message_text(f"❌ Ошибка сохранения прокси:\n{e}")
     return ConversationHandler.END
 
@@ -883,6 +894,7 @@ async def _save_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE, proxy_
         )
         logger.info(f"Admin {update.effective_user.id} updated proxy: {proxy_string[:20]}...")
     except Exception as e:
+        logger.exception("Ошибка сохранения прокси (_save_proxy)")
         await update.message.reply_text(f"❌ Ошибка сохранения прокси:\n{e}")
     return ConversationHandler.END
 
@@ -973,6 +985,47 @@ async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 
+def _build_chats_conv(
+    entry_cb: str,
+    entry_handler,
+    menu_state: int,
+    edit_cb: str,
+    edit_handler,
+    clear_cb: str,
+    clear_confirm_handler,
+    input_state: int,
+    input_handler,
+    confirm_state: int,
+    confirm_cb: str,
+    execute_handler,
+) -> ConversationHandler:
+    """Фабрика ConversationHandler для управления списком чатов"""
+    return ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(entry_handler, pattern=f"^{entry_cb}$")
+        ],
+        states={
+            menu_state: [
+                CallbackQueryHandler(edit_handler, pattern=f"^{edit_cb}$"),
+                CallbackQueryHandler(clear_confirm_handler, pattern=f"^{clear_cb}$"),
+            ],
+            input_state: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, input_handler)
+            ],
+            confirm_state: [
+                CallbackQueryHandler(execute_handler, pattern=f"^{confirm_cb}$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$|^admin_menu$"),
+            CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
+        ],
+        conversation_timeout=300,
+        allow_reentry=True,
+    )
+
+
 def register_admin_handlers(app):
     """Регистрация обработчиков админки"""
     # Команда /admin
@@ -1038,58 +1091,36 @@ def register_admin_handlers(app):
     app.add_handler(add_admin_conv)
 
     # ConversationHandler: управление чатами ПВЗ
-    pvz_chats_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(manage_pvz_chats, pattern=f"^{AdminCB.PVZ_CHATS}$")
-        ],
-        states={
-            AdminState.PVZ_CHATS_MENU: [
-                CallbackQueryHandler(pvz_chats_edit_start, pattern=f"^{AdminCB.PVZ_CHATS_EDIT}$"),
-                CallbackQueryHandler(pvz_chats_clear_confirm, pattern=f"^{AdminCB.PVZ_CHATS_CLEAR}$"),
-            ],
-            AdminState.INPUT_PVZ_CHATS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_pvz_chats)
-            ],
-            AdminState.CONFIRM_CLEAR_PVZ: [
-                CallbackQueryHandler(pvz_chats_clear_execute, pattern=f"^{AdminCB.PVZ_CHATS_CLEAR_OK}$"),
-            ],
-        },
-        fallbacks=[
-            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$|^admin_menu$"),
-            CommandHandler("start", cancel_admin_conv),
-            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
-        ],
-        conversation_timeout=300,
-        allow_reentry=True,
-    )
-    app.add_handler(pvz_chats_conv)
+    app.add_handler(_build_chats_conv(
+        entry_cb=AdminCB.PVZ_CHATS,
+        entry_handler=manage_pvz_chats,
+        menu_state=AdminState.PVZ_CHATS_MENU,
+        edit_cb=AdminCB.PVZ_CHATS_EDIT,
+        edit_handler=pvz_chats_edit_start,
+        clear_cb=AdminCB.PVZ_CHATS_CLEAR,
+        clear_confirm_handler=pvz_chats_clear_confirm,
+        input_state=AdminState.INPUT_PVZ_CHATS,
+        input_handler=receive_pvz_chats,
+        confirm_state=AdminState.CONFIRM_CLEAR_PVZ,
+        confirm_cb=AdminCB.PVZ_CHATS_CLEAR_OK,
+        execute_handler=pvz_chats_clear_execute,
+    ))
 
     # ConversationHandler: управление чатами ЧС
-    bl_chats_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(manage_blacklist_chats, pattern=f"^{AdminCB.BLACKLIST_CHATS}$")
-        ],
-        states={
-            AdminState.BL_CHATS_MENU: [
-                CallbackQueryHandler(bl_chats_edit_start, pattern=f"^{AdminCB.BL_CHATS_EDIT}$"),
-                CallbackQueryHandler(bl_chats_clear_confirm, pattern=f"^{AdminCB.BL_CHATS_CLEAR}$"),
-            ],
-            AdminState.INPUT_BLACKLIST_CHATS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, receive_blacklist_chats)
-            ],
-            AdminState.CONFIRM_CLEAR_BL: [
-                CallbackQueryHandler(bl_chats_clear_execute, pattern=f"^{AdminCB.BL_CHATS_CLEAR_OK}$"),
-            ],
-        },
-        fallbacks=[
-            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$|^admin_menu$"),
-            CommandHandler("start", cancel_admin_conv),
-            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
-        ],
-        conversation_timeout=300,
-        allow_reentry=True,
-    )
-    app.add_handler(bl_chats_conv)
+    app.add_handler(_build_chats_conv(
+        entry_cb=AdminCB.BLACKLIST_CHATS,
+        entry_handler=manage_blacklist_chats,
+        menu_state=AdminState.BL_CHATS_MENU,
+        edit_cb=AdminCB.BL_CHATS_EDIT,
+        edit_handler=bl_chats_edit_start,
+        clear_cb=AdminCB.BL_CHATS_CLEAR,
+        clear_confirm_handler=bl_chats_clear_confirm,
+        input_state=AdminState.INPUT_BLACKLIST_CHATS,
+        input_handler=receive_blacklist_chats,
+        confirm_state=AdminState.CONFIRM_CLEAR_BL,
+        confirm_cb=AdminCB.BL_CHATS_CLEAR_OK,
+        execute_handler=bl_chats_clear_execute,
+    ))
 
     # Управление ценами подписок
     app.add_handler(CallbackQueryHandler(manage_prices, pattern=f"^{AdminCB.MANAGE_PRICES}$"))

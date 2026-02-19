@@ -1,5 +1,5 @@
 """Обработчики подписок и платежей"""
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -36,11 +36,17 @@ async def subscription_keyboard(service: SubscriptionService):
     for key in ["day", "week", "month"]:
         plan = plans[key]
         price_rub = plan["price"] // 100
-        buttons.append([InlineKeyboardButton(
-            f"{plan['label']} — {price_rub} RUB",
-            callback_data=f"buy_{key}"
-        )])
-    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=SubCB.BACK)])
+        if config.PROVIDER_TOKEN:
+            buttons.append([InlineKeyboardButton(
+                f"{plan['label']} — {price_rub} RUB",
+                callback_data=f"buy_{key}"
+            )])
+        else:
+            buttons.append([InlineKeyboardButton(
+                f"{plan['label']} — {price_rub} RUB",
+                callback_data="noop"
+            )])
+    buttons.append([InlineKeyboardButton("❌ Закрыть", callback_data=SubCB.BACK)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -53,9 +59,9 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trial = await service.get_trial_info(user_id)
 
     if info:
-        active_until = datetime.fromisoformat(info["active_until"])
-        if active_until > datetime.utcnow():
-            remaining = active_until - datetime.utcnow()
+        active_until = datetime.fromisoformat(info["active_until"]).replace(tzinfo=timezone.utc)
+        if active_until > datetime.now(timezone.utc):
+            remaining = active_until - datetime.now(timezone.utc)
             days_left = remaining.days
             hours_left = remaining.seconds // 3600
 
@@ -72,8 +78,8 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Выберите тариф для активации:"
             )
     elif trial and trial["is_active"]:
-        trial_until = datetime.fromisoformat(trial["trial_until"])
-        remaining = trial_until - datetime.utcnow()
+        trial_until = datetime.fromisoformat(trial["trial_until"]).replace(tzinfo=timezone.utc)
+        remaining = trial_until - datetime.now(timezone.utc)
         days_left = remaining.days
         hours_left = remaining.seconds // 3600
         status_text = (
@@ -93,7 +99,11 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Выберите тариф для активации:"
         )
 
-    text = f"💳 <b>Подписка</b>\n\n{status_text}"
+    contact_line = (
+        "\n\n📩 Для оформления подписки обратитесь к @IKM0000"
+        if not config.PROVIDER_TOKEN else ""
+    )
+    text = f"💳 <b>Подписка</b>\n\n{status_text}{contact_line}"
 
     keyboard = await subscription_keyboard(service)
 
@@ -133,7 +143,7 @@ async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prices=[LabeledPrice(title, price)],
         )
     except Exception as e:
-        logger.error(f"send_invoice error: plan={plan}, price={price}, error={e}")
+        logger.exception(f"send_invoice error: plan={plan}, price={price}")
         await context.bot.send_message(
             chat_id=query.message.chat.id,
             text=f"❌ Ошибка создания платежа: {e}",
@@ -197,11 +207,16 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         )
 
     except Exception as e:
-        logger.error(f"Error activating subscription after payment: user={user_id}, error={e}")
+        logger.exception(f"Error activating subscription after payment: user={user_id}")
         await update.message.reply_text(
             "❌ Оплата прошла, но произошла ошибка при активации подписки.\n"
             "Обратитесь в поддержку с данным сообщением.",
         )
+
+
+async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Заглушка для неактивных кнопок тарифов"""
+    await update.callback_query.answer()
 
 
 def register_subscription_handlers(app):
@@ -209,8 +224,11 @@ def register_subscription_handlers(app):
     # Меню подписки
     app.add_handler(CallbackQueryHandler(subscription_menu, pattern=f"^{SubCB.MENU}$"))
 
-    # Покупка
+    # Покупка (активна только при наличии PROVIDER_TOKEN)
     app.add_handler(CallbackQueryHandler(buy_subscription, pattern="^buy_(day|week|month)$"))
+
+    # Заглушка для кнопок тарифов без платёжного токена
+    app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop$"))
 
     # Pre-checkout (обязательно для Telegram Payments)
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))

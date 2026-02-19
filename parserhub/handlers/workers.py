@@ -1,6 +1,7 @@
 """Обработчики мониторинга ПВЗ"""
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.error import BadRequest
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -9,13 +10,13 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+from httpx import HTTPStatusError
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
-from parserhub.session_manager import SessionManager
 from parserhub.api_client import WorkersAPI
-from parserhub.models import ActiveTask, WorkersFilters
-from parserhub.validators import Validators, AntiSpam
+from parserhub.models import ActiveTask
+from parserhub.validators import Validators
 from parserhub.services.subscription_service import SubscriptionService
 from parserhub.handlers.admin import _is_admin
 from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton, show_main_menu
@@ -35,7 +36,7 @@ class WorkersState:
 
 # Reply-кнопки подменю
 class WorkersBtn:
-    START = "🚀 Запустить мониторинг"
+    START = "🚀 Поиск сотрудников"
     MY_TASKS = "📋 Задачи мониторинга"
     MODE_WORKER = "👷 Работники"
     MODE_EMPLOYER = "🏢 Работодатели"
@@ -76,13 +77,16 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+            msg = update.callback_query.message
+            if msg:
+                await msg.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         else:
             await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         return
 
     keyboard = ReplyKeyboardMarkup([
         [KeyboardButton(WorkersBtn.START), KeyboardButton(WorkersBtn.MY_TASKS)],
+        [KeyboardButton(MenuButton.BLACKLIST)],
         [KeyboardButton(MenuButton.BACK)],
     ], resize_keyboard=True)
 
@@ -94,7 +98,9 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+        msg = update.callback_query.message
+        if msg:
+            await msg.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
     else:
         await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -308,12 +314,7 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     max_price = context.user_data.get("workers_max_price")
     city = context.user_data.get("workers_city", "ALL")
 
-    # Чаты берутся из глобальных настроек (задаются администратором)
-    db: DatabaseService = context.bot_data["db"]
-    chats = await db.get_global_chats('pvz_monitoring_chats')
-
     mode_name = "Работники" if mode == "worker" else "Работодатели"
-    chats_str = "\n".join([f"• {chat}" for chat in chats]) if chats else "Настраиваются администратором"
 
     city_labels = {"МСК": "🏙 Москва", "СПБ": "🌊 Санкт-Петербург", "ALL": "🌍 Все источники"}
     city_str = city_labels.get(city, "🌍 Все источники")
@@ -338,7 +339,6 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = (
         "📋 <b>Подтверждение запуска</b>\n\n"
         f"<b>Режим:</b> {mode_name}\n\n"
-        #f"<b>Чаты:</b>\n{chats_str}\n\n"
         f"<b>Фильтры:</b>\n{filters_str}\n\n"
         "Запустить мониторинг?"
     )
@@ -354,7 +354,6 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     """Подтверждение - запуск мониторинга"""
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
-    session_mgr: SessionManager = context.bot_data["session_manager"]
     workers_api: WorkersAPI = context.bot_data["workers_api"]
 
     # Проверка: у пользователя уже есть запущенная задача мониторинга ПВЗ?
@@ -395,14 +394,16 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     max_price = context.user_data.get("workers_max_price")
     city = context.user_data.get("workers_city", "ALL")
 
-    filters = {
+    monitoring_filters = {
         "date_from": date_from,
         "date_to": date_to,
-        "min_price": min_price,
-        "max_price": max_price,
         "shk_filter": "любое",
         "city_filter": city,
     }
+    if (v := context.user_data.get("workers_min_price")) is not None:
+        monitoring_filters["min_price"] = v
+    if (v := context.user_data.get("workers_max_price")) is not None:
+        monitoring_filters["max_price"] = v
 
     try:
         # Запустить мониторинг (уведомления через основной PurserHub бот)
@@ -410,7 +411,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             user_id=user_id,
             mode=mode,
             chats=chats,
-            filters=filters,
+            filters=monitoring_filters,
             session_path=session_path,
             blacklist_session_path=blacklist_session_path,
             notification_chat_id=user_id,
@@ -426,7 +427,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             service="workers",
             task_type="monitoring",
             status="running",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         await db.add_task(task)
 
@@ -440,26 +441,13 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         logger.info(f"Мониторинг запущен: user={user_id}, task={task_id}")
 
-    except Exception as e:
-        logger.error(f"Ошибка запуска мониторинга: {e}")
-
-        # Определяем: ошибка авторизации или другая?
-        is_auth_error = False
-        try:
-            detail = e.response.json().get("detail", "").lower()
-            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
-        except Exception:
-            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
-
+    except HTTPStatusError as e:
+        detail = e.response.json().get("detail", "").lower()
+        is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
         if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
-
-            # Сбросить статус авторизации в БД
             await db.update_auth_status(user_id, "parser", False)
-
-            # Очистить данные пользователя
             context.user_data.clear()
-
             await update.message.reply_text(
                 "⚠️ <b>Авторизация оборвана</b>\n\n"
                 "Произошла ошибка со стороны Telegram.\n"
@@ -467,9 +455,23 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 parse_mode="HTML"
             )
         else:
+            await update.message.reply_text(f"❌ Ошибка запуска мониторинга:\n\n{str(e)}")
+        await show_main_menu(update, context)
+    except Exception as e:
+        logger.exception(f"Ошибка запуска мониторинга для user {user_id}")
+        is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+        if is_auth_error:
+            logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
+            await db.update_auth_status(user_id, "parser", False)
+            context.user_data.clear()
             await update.message.reply_text(
-                f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
             )
+        else:
+            await update.message.reply_text(f"❌ Ошибка запуска мониторинга:\n\n{str(e)}")
         await show_main_menu(update, context)
 
     return ConversationHandler.END
@@ -508,7 +510,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
 
-    keyboard.append([InlineKeyboardButton("⛔ Завершить все задачи", callback_data=WorkersCB.STOP_ALL_TASKS)])
+    keyboard.append([InlineKeyboardButton("⛔ Завершить активную задачу", callback_data=WorkersCB.STOP_ALL_TASKS)])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=WorkersCB.WORKERS_MENU)])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -531,6 +533,8 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
 
+    await query.answer()  # всегда сначала — убирает индикатор загрузки кнопки
+
     try:
         status = await workers_api.get_status(task_id)
 
@@ -546,11 +550,20 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.answer()
+        STATUS_MAP = {
+            "running":    "✅ Активный мониторинг",
+            "stopped":    "⏹ Остановлен",
+            "paused":     "⏸ Приостановлен",
+            "auth_error": "🔴 Сессия аннулирована — авторизуйтесь заново",
+            "failed":     "❌ Ошибка сервиса",
+        }
+        raw_status = status.get("status", "unknown")
+        display_status = STATUS_MAP.get(raw_status, f"❓ {raw_status}")
+
         await query.edit_message_text(
             f"📊 <b>Статус задачи</b>\n\n"
             f"<b>Task ID:</b> <code>{task_id}</code>\n"
-            f"<b>Статус:</b> {status['status']}\n"
+            f"<b>Статус:</b> {display_status}\n"
             f"<b>Режим:</b> {status['mode']}\n\n"
             f"<b>Статистика:</b>\n"
             f"• Просканировано сообщений: {total_scanned}\n"
@@ -560,8 +573,12 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.exception(f"Ошибка редактирования сообщения для задачи {task_id}")
+
     except Exception as e:
-        logger.error(f"Ошибка получения статуса задачи {task_id}: {e}")
+        logger.exception(f"Ошибка получения статуса задачи {task_id}")
 
         keyboard = [
             [InlineKeyboardButton("🗑 Принудительно завершить", callback_data=f"{WorkersCB.FORCE_CLOSE_TASK}{task_id}")],
@@ -569,7 +586,6 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.answer()
         await query.edit_message_text(
             f"❌ <b>Ошибка получения статуса</b>\n\n"
             f"<b>Task ID:</b> <code>{task_id}</code>\n\n"
@@ -589,14 +605,14 @@ async def stop_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db: DatabaseService = context.bot_data["db"]
 
     try:
-        result = await workers_api.stop_monitoring(task_id)
+        await workers_api.stop_monitoring(task_id)
         await db.delete_task(task_id)
 
         await query.answer("✅ Задача остановлена")
         await show_my_tasks(update, context)
 
     except Exception as e:
-        logger.error(f"Ошибка остановки задачи: {e}")
+        logger.exception("Ошибка остановки задачи")
         # Если сервис недоступен — принудительно завершаем в локальной БД
         await db.delete_task(task_id)
         await query.answer("⚠️ Задача завершена локально (сервис недоступен)")
@@ -615,7 +631,7 @@ async def force_close_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await workers_api.stop_monitoring(task_id)
     except Exception:
-        pass  # Сервис мог перезапуститься, задача уже не существует
+        logger.warning(f"Не удалось остановить задачу {task_id} на сервере (игнорируется)")
 
     # Завершаем в локальной БД
     await db.delete_task(task_id)
@@ -641,7 +657,7 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await workers_api.stop_monitoring(task.task_id)
             except Exception:
-                pass  # Сервис мог перезапуститься
+                logger.warning(f"Не удалось остановить задачу {task.task_id} на сервере (игнорируется)")
 
             # Завершаем в локальной БД
             await db.delete_task(task.task_id)
@@ -654,7 +670,34 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_notification_blacklist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка кнопки 'Проверить в ЧС' из уведомления workers-service"""
     query = update.callback_query
+    user_id = update.effective_user.id
+    db: DatabaseService = context.bot_data["db"]
+
+    user = await db.get_user(user_id)
+    if not user or not user.is_blacklist_authorized:
+        await query.answer("Аккаунт ЧС не авторизован", show_alert=True)
+        await query.message.reply_text(
+            "⚫ <b>Черный список</b>\n\n"
+            "❌ Для работы необходимо авторизовать аккаунт черного списка.\n\n"
+            "Перейдите в «👤 Мой аккаунт» для авторизации.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Проверяем, не идёт ли уже поиск для этого пользователя (защита при concurrent обработке)
+    searching: set = context.bot_data.setdefault("blacklist_searching", set())
+    if user_id in searching:
+        await query.answer()
+        await query.message.reply_text(
+            "⏳ <b>Проверка уже выполняется</b>\n\n"
+            "Одновременно по чёрному списку может проверяться только один пользователь.\n"
+            "Пожалуйста, подождите завершения поиска и попробуйте снова.",
+            parse_mode="HTML",
+        )
+        return
+
     await query.answer("Поиск в черном списке...")
+    searching.add(user_id)
 
     try:
         item_id = int(query.data.split(":")[1])
@@ -686,9 +729,22 @@ async def handle_notification_blacklist_check(update: Update, context: ContextTy
         else:
             await query.message.reply_text("✅ В черном списке НЕ найден")
 
+    except HTTPStatusError as e:
+        if e.response.status_code == 500:
+            await query.message.reply_text(
+                "⏳ <b>Проверка уже выполняется</b>\n\n"
+                "Одновременно по чёрному списку может проверяться только один пользователь.\n"
+                "Пожалуйста, подождите завершения поиска и попробуйте снова.",
+                parse_mode="HTML",
+            )
+        else:
+            logger.exception("Ошибка проверки ЧС из уведомления")
+            await query.message.reply_text(f"❌ Ошибка проверки: {e}")
     except Exception as e:
-        logger.error(f"Ошибка проверки ЧС из уведомления: {e}")
+        logger.exception("Ошибка проверки ЧС из уведомления")
         await query.message.reply_text(f"❌ Ошибка проверки: {e}")
+    finally:
+        searching.discard(user_id)
 
 
 async def handle_notification_ignore(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -699,17 +755,8 @@ async def handle_notification_ignore(update: Update, context: ContextTypes.DEFAU
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception as e:
-        logger.error(f"Ошибка обработки ignore: {e}")
+        logger.exception("Ошибка обработки ignore")
 
-
-async def cancel_workers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отмена настройки мониторинга"""
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text("❌ Настройка мониторинга отменена.")
-    else:
-        await update.message.reply_text("❌ Настройка мониторинга отменена.")
-    return ConversationHandler.END
 
 
 def register_workers_handlers(app):

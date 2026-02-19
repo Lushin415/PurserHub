@@ -33,13 +33,30 @@ class AuthCB:
     DISCONNECT_ALL = "disconnect_all"
 
 
+async def _finalize_auth_success(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершение успешной авторизации: сохраняет данные и уведомляет пользователя"""
+    user_id = update.effective_user.id
+    session_type = context.user_data.get("auth_session_type")
+    db: DatabaseService = context.bot_data["db"]
+
+    tg_user = update.effective_user
+    await db.create_or_update_user(user_id, tg_user.username, tg_user.full_name)
+    await db.update_auth_status(user_id, session_type, True)
+
+    session_name = "Парсер ПВЗ" if session_type == "parser" else "Черный список"
+    await update.message.reply_text(
+        f"✅ <b>Аккаунт подключён!</b>\n\n"
+        f"{session_name} успешно авторизован.",
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
+
+
 async def show_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать меню аккаунта"""
     user_id = update.effective_user.id
     db: DatabaseService = context.bot_data["db"]
     session_mgr: SessionManager = context.bot_data["session_manager"]
-
-    user = await db.get_user(user_id)
 
     # Проверяем статус сессий
     parser_exists = session_mgr.session_exists(user_id, "parser")
@@ -53,7 +70,7 @@ async def show_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Авторизация парсера ПВЗ
     if not parser_exists:
         keyboard.append([
-            InlineKeyboardButton("🔑 Авторизация парсера ПВЗ", callback_data=AuthCB.AUTH_PARSER)
+            InlineKeyboardButton("🔑 Авторизация для функций ПВЗ", callback_data=AuthCB.AUTH_PARSER)
         ])
     else:
         keyboard.append([
@@ -137,7 +154,7 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Удаляем сообщение с номером (безопасность)
     try:
         await update.message.delete()
-    except:
+    except Exception:
         pass
 
     # Валидация номера телефона
@@ -171,7 +188,7 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             return AuthState.WAITING_CODE
 
     except Exception as e:
-        logger.error(f"Ошибка отправки кода: {e}")
+        logger.exception("Ошибка отправки кода")
         await update.message.reply_text(
             f"❌ Ошибка отправки кода:\n{str(e)}\n\n"
             "Попробуйте снова позже.",
@@ -189,7 +206,6 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     logger.info(f"[HANDLER] receive_code вызван: user_id={user_id}, session_type={session_type}, code={code}")
 
     session_mgr: SessionManager = context.bot_data["session_manager"]
-    db: DatabaseService = context.bot_data["db"]
 
     # Удаляем сообщение с кодом
     try:
@@ -203,18 +219,7 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         result = await session_mgr.confirm_code(user_id, code)
 
         if result == "success":
-            # Успех!
-            tg_user = update.effective_user
-            await db.create_or_update_user(user_id, tg_user.username, tg_user.full_name)
-            await db.update_auth_status(user_id, session_type, True)
-
-            session_name = "Парсер ПВЗ" if session_type == "parser" else "Черный список"
-            await update.message.reply_text(
-                f"✅ <b>Аккаунт подключён!</b>\n\n"
-                f"{session_name} успешно авторизован.",
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
+            return await _finalize_auth_success(update, context)
 
         elif result == "need_2fa":
             keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="auth_cancel")]]
@@ -246,10 +251,8 @@ async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     """Получен пароль 2FA"""
     password = update.message.text.strip()
     user_id = update.effective_user.id
-    session_type = context.user_data.get("auth_session_type")
 
     session_mgr: SessionManager = context.bot_data["session_manager"]
-    db: DatabaseService = context.bot_data["db"]
 
     # Удаляем сообщение с паролем
     try:
@@ -261,17 +264,7 @@ async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         success = await session_mgr.confirm_2fa(user_id, password)
 
         if success:
-            tg_user = update.effective_user
-            await db.create_or_update_user(user_id, tg_user.username, tg_user.full_name)
-            await db.update_auth_status(user_id, session_type, True)
-
-            session_name = "Парсер ПВЗ" if session_type == "parser" else "Черный список"
-            await update.message.reply_text(
-                f"✅ <b>Аккаунт подключён!</b>\n\n"
-                f"{session_name} успешно авторизован.",
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
+            return await _finalize_auth_success(update, context)
         else:
             await update.message.reply_text(
                 "❌ Неверный пароль.\n\n"
