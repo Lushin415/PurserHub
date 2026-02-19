@@ -62,7 +62,7 @@ async def show_workers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = await db.get_user(user_id)
 
-    if not user.is_parser_authorized:
+    if user is None or not user.is_parser_authorized:
         keyboard = ReplyKeyboardMarkup([
             [KeyboardButton(MenuButton.ACCOUNT)],
             [KeyboardButton(MenuButton.BACK)],
@@ -107,7 +107,7 @@ async def start_monitoring_select_mode(update: Update, context: ContextTypes.DEF
 
     if not await _is_admin(user_id, db):
         sub_service: SubscriptionService = context.bot_data["subscription"]
-        if not await sub_service.has_active(user_id):
+        if not await sub_service.has_access(user_id):
             await update.message.reply_text(
                 "🔒 <b>Требуется подписка</b>\n\n"
                 "Для запуска мониторинга ПВЗ необходима активная подписка.\n"

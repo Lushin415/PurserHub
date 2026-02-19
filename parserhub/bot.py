@@ -1,6 +1,7 @@
 """Главный модуль Telegram бота ParserHub"""
 import sys
 import asyncio
+import httpx
 from pathlib import Path
 from loguru import logger
 from telegram import BotCommand
@@ -81,6 +82,9 @@ async def post_init(application: Application):
     application.bot_data["workers_api"] = workers_api
     application.bot_data["realty_api"] = realty_api
 
+    # Очистить зомби-задачи (задачи, которых уже нет в сервисах после рестарта)
+    await _reconcile_tasks(db, config.WORKERS_SERVICE_URL, config.REALTY_SERVICE_URL)
+
     # Запустить фоновую очистку истёкших подписок
     application.bot_data["cleaner_task"] = asyncio.create_task(
         _subscription_cleaner_loop(application)
@@ -94,6 +98,36 @@ async def post_init(application: Application):
     logger.info("Команды бота установлены (Menu Button)")
 
     logger.info("Инициализация завершена")
+
+
+async def _reconcile_tasks(db: DatabaseService, workers_url: str, realty_url: str):
+    """При старте удаляем из active_tasks задачи, которых уже нет в сервисах (зомби)"""
+    tasks = await db.get_all_running_tasks()
+    if not tasks:
+        logger.info("Reconcile: активных задач нет")
+        return
+
+    removed = 0
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for task in tasks:
+            try:
+                if task.service == "workers":
+                    r = await client.get(f"{workers_url}/workers/status/{task.task_id}")
+                elif task.service == "realty":
+                    r = await client.get(f"{realty_url}/parse/status/{task.task_id}")
+                else:
+                    continue
+
+                if r.status_code == 404:
+                    await db.delete_task(task.task_id)
+                    removed += 1
+                    logger.info(f"Reconcile: зомби-задача удалена {task.task_id} (user={task.user_id})")
+
+            except Exception as e:
+                # Сервис недоступен — не удаляем, он может подняться
+                logger.warning(f"Reconcile: не удалось проверить {task.task_id}: {e}")
+
+    logger.info(f"Reconcile завершён: проверено {len(tasks)}, удалено зомби: {removed}")
 
 
 async def _subscription_cleaner_loop(application: Application):

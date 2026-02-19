@@ -204,6 +204,8 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         if result == "success":
             # Успех!
+            tg_user = update.effective_user
+            await db.create_or_update_user(user_id, tg_user.username, tg_user.full_name)
             await db.update_auth_status(user_id, session_type, True)
 
             session_name = "Парсер ПВЗ" if session_type == "parser" else "Черный список"
@@ -259,6 +261,8 @@ async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         success = await session_mgr.confirm_2fa(user_id, password)
 
         if success:
+            tg_user = update.effective_user
+            await db.create_or_update_user(user_id, tg_user.username, tg_user.full_name)
             await db.update_auth_status(user_id, session_type, True)
 
             session_name = "Парсер ПВЗ" if session_type == "parser" else "Черный список"

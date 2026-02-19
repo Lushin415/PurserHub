@@ -16,6 +16,7 @@ class User(BaseModel):
     is_blacklist_authorized: bool = False
     created_at: datetime
     last_active: Optional[datetime] = None
+    trial_until: Optional[datetime] = None
 
 
 class UserSettings(BaseModel):

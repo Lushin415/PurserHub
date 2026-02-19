@@ -10,8 +10,8 @@ class SubscriptionService:
 
     DEFAULT_PLANS = {
         "day": {"days": 1, "price": 10000, "label": "1 день"},
-        "month": {"days": 30, "price": 50000, "label": "30 дней"},
-        "quarter": {"days": 90, "price": 100000, "label": "90 дней"},
+        "week": {"days": 7, "price": 19900, "label": "7 дней"},
+        "month": {"days": 30, "price": 49900, "label": "30 дней"},
     }
 
     def __init__(self, db_path: str):
@@ -62,7 +62,7 @@ class SubscriptionService:
         logger.info(f"Обновлена цена тарифа {plan}: {price} коп.")
 
     async def has_active(self, user_id: int) -> bool:
-        """Проверить есть ли активная подписка"""
+        """Проверить есть ли активная платная подписка"""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT active_until FROM subscriptions WHERE user_id = ?",
@@ -72,6 +72,28 @@ class SubscriptionService:
                 if not row:
                     return False
                 return datetime.fromisoformat(row[0]) > datetime.utcnow()
+
+    async def get_trial_info(self, user_id: int) -> dict | None:
+        """Получить информацию о пробном периоде из таблицы users"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT trial_until FROM users WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row or not row[0]:
+                    return None
+                trial_until = datetime.fromisoformat(row[0])
+                return {
+                    "trial_until": row[0],
+                    "is_active": trial_until > datetime.utcnow(),
+                }
+
+    async def has_access(self, user_id: int) -> bool:
+        """Активная платная подписка ИЛИ активный пробный период"""
+        if await self.has_active(user_id):
+            return True
+        trial = await self.get_trial_info(user_id)
+        return bool(trial and trial["is_active"])
 
     async def get_info(self, user_id: int) -> dict | None:
         """Получить информацию о подписке пользователя"""

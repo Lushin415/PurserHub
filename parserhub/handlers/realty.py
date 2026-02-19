@@ -34,13 +34,14 @@ class RealtyBtn:
     AVITO = "🟦 Avito"
     CIAN = "🟩 Cian"
     BOTH = "🔀 Avito + Cian"
-    MY_TASKS = "📋 Задачи мониторинга"
+    MY_TASKS = "🏠 Мои задачи недвижимости"
     CONFIRM = "✅ Запустить"
 
 
 # Callback data (только для inline: задачи)
 class RealtyCB:
     REALTY_MENU = "realty_menu"
+    MY_TASKS = "my_realty_tasks"
     VIEW_TASK = "view_realty_task_"
     STOP_TASK = "stop_realty_task_"
     STOP_ALL_TASKS = "stop_all_realty_tasks"
@@ -77,7 +78,7 @@ async def start_parsing_select_source(update: Update, context: ContextTypes.DEFA
 
     if not await _is_admin(user_id, db):
         sub_service: SubscriptionService = context.bot_data["subscription"]
-        if not await sub_service.has_active(user_id):
+        if not await sub_service.has_access(user_id):
             await update.message.reply_text(
                 "🔒 <b>Требуется подписка</b>\n\n"
                 "Для запуска мониторинга недвижимости необходима активная подписка.\n"
@@ -313,7 +314,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tasks = await db.get_user_tasks(user_id, service="realty")
 
     if not tasks:
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=RealtyCB.REALTY_MENU)]]
+        keyboard = [[InlineKeyboardButton("🔙 В главное меню", callback_data="main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
@@ -346,7 +347,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
     keyboard.append([InlineKeyboardButton("⛔ Завершить все задачи", callback_data=RealtyCB.STOP_ALL_TASKS)])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=RealtyCB.REALTY_MENU)])
+    keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
@@ -528,6 +529,7 @@ def register_realty_handlers(app):
     ))
 
     # Inline callback: просмотр и управление задачами (остаются inline)
+    app.add_handler(CallbackQueryHandler(show_my_tasks, pattern=f"^{RealtyCB.MY_TASKS}$"))
     app.add_handler(CallbackQueryHandler(view_task, pattern=f"^{RealtyCB.VIEW_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_task, pattern=f"^{RealtyCB.STOP_TASK}"))
     app.add_handler(CallbackQueryHandler(force_close_task, pattern=f"^{RealtyCB.FORCE_CLOSE_TASK}"))

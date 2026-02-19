@@ -1,7 +1,7 @@
 """Сервис для работы с SQLite базой данных"""
 import aiosqlite
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from loguru import logger
@@ -85,6 +85,15 @@ class DatabaseService:
             """)
 
             await db.commit()
+
+            # Миграция: trial_until (безопасно — игнорируем если уже есть)
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN trial_until TEXT DEFAULT NULL")
+                await db.commit()
+                logger.info("Миграция: добавлена колонка trial_until в таблицу users")
+            except Exception:
+                pass  # Колонка уже существует
+
             logger.info(f"База данных инициализирована: {self.db_path}")
 
     # ===== Пользователи =====
@@ -137,18 +146,20 @@ class DatabaseService:
                     (username, full_name, phone, now, user_id),
                 )
             else:
-                # Создание
+                # Создание — выдаём пробный период 3 дня
+                trial_until = (datetime.utcnow() + timedelta(days=3)).isoformat()
                 await db.execute(
                     """
-                    INSERT INTO users (user_id, username, full_name, phone, created_at, last_active)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (user_id, username, full_name, phone, created_at, last_active, trial_until)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, username, full_name, phone, now, now),
+                    (user_id, username, full_name, phone, now, now, trial_until),
                 )
                 # Создать настройки по умолчанию
                 await db.execute(
                     "INSERT INTO user_settings (user_id) VALUES (?)", (user_id,)
                 )
+                logger.info(f"Новый пользователь {user_id}: пробный период до {trial_until}")
 
             await db.commit()
 
@@ -251,6 +262,16 @@ class DatabaseService:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM active_tasks WHERE task_id = ?", (task_id,))
             await db.commit()
+
+    async def get_all_running_tasks(self) -> list[ActiveTask]:
+        """Получить все задачи со статусом running (для reconcile при старте)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM active_tasks WHERE status = 'running' ORDER BY created_at DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [ActiveTask(**dict(row)) for row in rows]
 
     async def clear_running_tasks(self) -> int:
         """Удалить все задачи со статусом running (вызывается при shutdown)"""
