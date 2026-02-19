@@ -1,7 +1,8 @@
 """Обработчики парсинга недвижимости (Avito/Cian)"""
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.error import BadRequest
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
@@ -10,12 +11,13 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+from httpx import HTTPStatusError
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
 from parserhub.api_client import RealtyAPI
 from parserhub.models import ActiveTask
-from parserhub.validators import Validators, AntiSpam
+from parserhub.validators import Validators
 from parserhub.services.subscription_service import SubscriptionService
 from parserhub.handlers.admin import _is_admin
 from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton, show_main_menu
@@ -34,7 +36,7 @@ class RealtyBtn:
     AVITO = "🟦 Avito"
     CIAN = "🟩 Cian"
     BOTH = "🔀 Avito + Cian"
-    MY_TASKS = "🏠 Мои задачи недвижимости"
+    MY_TASKS = "🏠 Мои задачи по объявлениям"
     CONFIRM = "✅ Запустить"
 
 
@@ -44,6 +46,7 @@ class RealtyCB:
     MY_TASKS = "my_realty_tasks"
     VIEW_TASK = "view_realty_task_"
     STOP_TASK = "stop_realty_task_"
+    RESUME_TASK = "resume_realty_task_"
     STOP_ALL_TASKS = "stop_all_realty_tasks"
     FORCE_CLOSE_TASK = "force_close_realty_task_"
 
@@ -63,7 +66,9 @@ async def show_realty_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+        msg = update.callback_query.message
+        if msg:
+            await msg.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
     else:
         await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -243,6 +248,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             cian_url=cian_url,
             notification_bot_token=config.BOT_TOKEN,
             notification_chat_id=user_id,
+            pause_notification_chat_id=config.ADMIN_ID,
         )
 
         task_id = result["task_id"]
@@ -262,7 +268,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             service="realty",
             task_type=task_type,
             status="running",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         await db.add_task(task)
 
@@ -276,21 +282,12 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         logger.info(f"Мониторинг запущен: user={user_id}, task={task_id}, type={task_type}")
 
-    except Exception as e:
-        logger.error(f"Ошибка запуска мониторинга: {e}")
-
-        # Определяем: ошибка авторизации или другая?
-        is_auth_error = False
-        try:
-            detail = e.response.json().get("detail", "").lower()
-            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
-        except Exception:
-            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
-
+    except HTTPStatusError as e:
+        detail = e.response.json().get("detail", "").lower()
+        is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
         if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
             context.user_data.clear()
-
             await update.message.reply_text(
                 "⚠️ <b>Авторизация оборвана</b>\n\n"
                 "Произошла ошибка со стороны Telegram.\n"
@@ -298,9 +295,22 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 parse_mode="HTML"
             )
         else:
+            await update.message.reply_text(f"❌ Ошибка запуска мониторинга:\n\n{str(e)}")
+        await show_main_menu(update, context)
+    except Exception as e:
+        logger.exception(f"Ошибка запуска мониторинга для user {user_id}")
+        is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+        if is_auth_error:
+            logger.warning(f"Обнаружен обрыв авторизации для user {user_id}")
+            context.user_data.clear()
             await update.message.reply_text(
-                f"❌ Ошибка запуска мониторинга:\n\n{str(e)}"
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
             )
+        else:
+            await update.message.reply_text(f"❌ Ошибка запуска мониторинга:\n\n{str(e)}")
         await show_main_menu(update, context)
 
     return ConversationHandler.END
@@ -337,7 +347,12 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "avito_cian": "🔀",
         }.get(task.task_type, "📄")
 
-        status_emoji = "🟢" if task.status == "running" else "⭕"
+        if task.status == "running":
+            status_emoji = "🟢"
+        elif task.status == "paused":
+            status_emoji = "⏸"
+        else:
+            status_emoji = "⭕"
 
         keyboard.append([
             InlineKeyboardButton(
@@ -346,7 +361,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
 
-    keyboard.append([InlineKeyboardButton("⛔ Завершить все задачи", callback_data=RealtyCB.STOP_ALL_TASKS)])
+    keyboard.append([InlineKeyboardButton("⛔ Завершить активную задачу", callback_data=RealtyCB.STOP_ALL_TASKS)])
     keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -368,30 +383,53 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_id = query.data.replace(RealtyCB.VIEW_TASK, "")
 
     realty_api: RealtyAPI = context.bot_data["realty_api"]
+    db: DatabaseService = context.bot_data["db"]
+
+    await query.answer()  # всегда сначала — убирает индикатор загрузки кнопки
 
     try:
         status = await realty_api.get_status(task_id)
         task_status = status.get("status", "unknown")
 
+        # 9.3: синхронизация bot.db если парсер поставил паузу
+        if task_status == "paused":
+            await db.update_task_status(task_id, "paused")
+        elif task_status == "monitoring" or task_status == "active":
+            await db.update_task_status(task_id, "running")
+
+        # Формируем клавиатуру с кнопкой возобновления для paused
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить", callback_data=f"{RealtyCB.VIEW_TASK}{task_id}")],
-            [InlineKeyboardButton("⛔ Остановить", callback_data=f"{RealtyCB.STOP_TASK}{task_id}")],
-            [InlineKeyboardButton("🔙 Назад", callback_data=RealtyCB.MY_TASKS)],
         ]
+        if task_status == "paused":
+            keyboard.append([InlineKeyboardButton("▶️ Возобновить", callback_data=f"{RealtyCB.RESUME_TASK}{task_id}")])
+        keyboard.append([InlineKeyboardButton("⛔ Остановить", callback_data=f"{RealtyCB.STOP_TASK}{task_id}")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=RealtyCB.MY_TASKS)])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        STATUS_LABEL = {
+            "monitoring": "📡 Активный мониторинг",
+            "active":     "📡 Активный мониторинг",
+            "paused":     "⏸ Приостановлен (ошибки сети)",
+            "stopped":    "⏹ Остановлен",
+        }
+
         # Проверка на режим мониторинга
-        if task_status == "monitoring":
+        if task_status in ("monitoring", "active"):
             progress = status.get("progress", {})
             found_ads = progress.get("found_ads", 0)
             filtered_ads = progress.get("filtered_ads", 0)
-            last_check = progress.get("last_check", "Не выполнялась")
+            raw_ts = status.get("updated_at")
+            if raw_ts:
+                dt = datetime.fromisoformat(raw_ts)
+                last_check = dt.strftime("%d.%m.%Y %H:%M")
+            else:
+                last_check = "Не выполнялась"
 
-            await query.answer()
             await query.edit_message_text(
                 f"📡 <b>Статус мониторинга</b>\n\n"
                 f"<b>Task ID:</b> <code>{task_id}</code>\n"
-                f"<b>Статус:</b> Активный мониторинг\n\n"
+                f"<b>Статус:</b> {STATUS_LABEL.get(task_status, task_status)}\n\n"
                 f"<b>Статистика:</b>\n"
                 f"• Найдено объявлений: {found_ads}\n"
                 f"• Отфильтровано: {filtered_ads}\n"
@@ -399,19 +437,28 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="HTML",
             )
+        elif task_status == "paused":
+            await query.edit_message_text(
+                f"⏸ <b>Мониторинг приостановлен</b>\n\n"
+                f"<b>Task ID:</b> <code>{task_id}</code>\n"
+                f"<b>Статус:</b> {STATUS_LABEL['paused']}\n\n"
+                "Произошло 5 ошибок подряд (сеть или прокси).\n"
+                "Нажмите «▶️ Возобновить» чтобы продолжить мониторинг.",
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
         else:
-            # Обычный режим парсинга
+            # Обычный/завершённый режим
             progress = status.get("progress", {})
             total_pages = progress.get("total_pages", 0)
             current_page = progress.get("current_page", 0)
             found_ads = progress.get("found_ads", 0)
             filtered_ads = progress.get("filtered_ads", 0)
 
-            await query.answer()
             await query.edit_message_text(
                 f"📊 <b>Статус мониторинга</b>\n\n"
                 f"<b>Task ID:</b> <code>{task_id}</code>\n"
-                f"<b>Статус:</b> {task_status}\n\n"
+                f"<b>Статус:</b> {STATUS_LABEL.get(task_status, task_status)}\n\n"
                 f"<b>Прогресс:</b>\n"
                 f"• Страниц: {current_page}/{total_pages}\n"
                 f"• Найдено объявлений: {found_ads}\n"
@@ -420,8 +467,12 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
 
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.exception(f"Ошибка редактирования сообщения для задачи {task_id}")
+
     except Exception as e:
-        logger.error(f"Ошибка получения статуса парсинга {task_id}: {e}")
+        logger.exception(f"Ошибка получения статуса парсинга {task_id}")
 
         keyboard = [
             [InlineKeyboardButton("🗑 Принудительно завершить", callback_data=f"{RealtyCB.FORCE_CLOSE_TASK}{task_id}")],
@@ -429,7 +480,6 @@ async def view_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.answer()
         await query.edit_message_text(
             f"❌ <b>Ошибка получения статуса</b>\n\n"
             f"<b>Task ID:</b> <code>{task_id}</code>\n\n"
@@ -449,14 +499,14 @@ async def stop_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db: DatabaseService = context.bot_data["db"]
 
     try:
-        result = await realty_api.stop_parsing(task_id)
+        await realty_api.stop_parsing(task_id)
         await db.delete_task(task_id)
 
         await query.answer("✅ Мониторинг остановлен")
         await show_my_tasks(update, context)
 
     except Exception as e:
-        logger.error(f"Ошибка остановки парсинга: {e}")
+        logger.exception("Ошибка остановки парсинга")
         await db.delete_task(task_id)
         await query.answer("⚠️ Задача завершена локально (сервис недоступен)")
         await show_my_tasks(update, context)
@@ -473,7 +523,7 @@ async def force_close_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await realty_api.stop_parsing(task_id)
     except Exception:
-        pass
+        logger.warning(f"Не удалось остановить задачу {task_id} на сервере (игнорируется)")
 
     await db.delete_task(task_id)
 
@@ -497,7 +547,7 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await realty_api.stop_parsing(task.task_id)
             except Exception:
-                pass
+                logger.warning(f"Не удалось остановить задачу {task.task_id} на сервере (игнорируется)")
 
             await db.delete_task(task.task_id)
             stopped_count += 1
@@ -506,14 +556,38 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_my_tasks(update, context)
 
 
-async def cancel_realty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отмена настройки парсинга"""
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text("❌ Настройка мониторинга отменена.")
-    else:
-        await update.message.reply_text("❌ Настройка мониторинга отменена.")
-    return ConversationHandler.END
+async def resume_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возобновление приостановленной задачи мониторинга"""
+    query = update.callback_query
+    task_id = query.data.replace(RealtyCB.RESUME_TASK, "")
+
+    realty_api: RealtyAPI = context.bot_data["realty_api"]
+    db: DatabaseService = context.bot_data["db"]
+
+    await query.answer()
+
+    try:
+        await realty_api.resume_parsing(task_id)
+        await db.update_task_status(task_id, "running")
+        await query.edit_message_text(
+            f"▶️ <b>Мониторинг возобновлён</b>\n\n"
+            f"<b>Task ID:</b> <code>{task_id}</code>\n\n"
+            "Мониторинг снова активен.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Мои задачи", callback_data=RealtyCB.MY_TASKS)
+            ]]),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        logger.exception(f"Ошибка возобновления задачи {task_id}")
+        await query.edit_message_text(
+            "❌ Не удалось возобновить мониторинг.\n\nПопробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data=RealtyCB.MY_TASKS)
+            ]]),
+        )
+
 
 
 def register_realty_handlers(app):
@@ -532,6 +606,7 @@ def register_realty_handlers(app):
     app.add_handler(CallbackQueryHandler(show_my_tasks, pattern=f"^{RealtyCB.MY_TASKS}$"))
     app.add_handler(CallbackQueryHandler(view_task, pattern=f"^{RealtyCB.VIEW_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_task, pattern=f"^{RealtyCB.STOP_TASK}"))
+    app.add_handler(CallbackQueryHandler(resume_task, pattern=f"^{RealtyCB.RESUME_TASK}"))
     app.add_handler(CallbackQueryHandler(force_close_task, pattern=f"^{RealtyCB.FORCE_CLOSE_TASK}"))
     app.add_handler(CallbackQueryHandler(stop_all_tasks, pattern=f"^{RealtyCB.STOP_ALL_TASKS}$"))
 
