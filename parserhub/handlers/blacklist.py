@@ -9,6 +9,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+from httpx import HTTPStatusError
 from loguru import logger
 
 from parserhub.db_service import DatabaseService
@@ -64,7 +65,9 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+            msg = update.callback_query.message
+            if msg:
+                await msg.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         else:
             await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
         return
@@ -82,7 +85,9 @@ async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+        msg = update.callback_query.message
+        if msg:
+            await msg.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
     else:
         await update.message.reply_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -117,6 +122,7 @@ async def _blacklist_search_task(
     workers_api: WorkersAPI,
     db: DatabaseService,
     blacklist_session_path: str,
+    bot_data: dict,
 ):
     """Фоновая задача поиска в ЧС — выполняется без блокировки бота"""
     try:
@@ -176,16 +182,9 @@ async def _blacklist_search_task(
 
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
 
-    except Exception as e:
-        logger.error(f"Ошибка фонового поиска в ЧС для user {user_id}: {e}")
-
-        is_auth_error = False
-        try:
-            detail = e.response.json().get("detail", "").lower()
-            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
-        except Exception:
-            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
-
+    except HTTPStatusError as e:
+        detail = e.response.json().get("detail", "").lower()
+        is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
         if is_auth_error:
             await db.update_auth_status(user_id, "blacklist", False)
             await bot.send_message(
@@ -198,10 +197,25 @@ async def _blacklist_search_task(
                 parse_mode="HTML",
             )
         else:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка проверки:\n\n{str(e)}")
+    except Exception as e:
+        logger.exception(f"Ошибка фонового поиска в ЧС для user {user_id}")
+        is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+        if is_auth_error:
+            await db.update_auth_status(user_id, "blacklist", False)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ Ошибка проверки:\n\n{str(e)}"
+                text=(
+                    "⚠️ <b>Авторизация оборвана</b>\n\n"
+                    "Произошла ошибка со стороны Telegram.\n"
+                    "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                ),
+                parse_mode="HTML",
             )
+        else:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка проверки:\n\n{str(e)}")
+    finally:
+        bot_data.get("blacklist_searching", set()).discard(user_id)
 
 
 async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -255,11 +269,30 @@ async def receive_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     db: DatabaseService = context.bot_data["db"]
     blacklist_session_path = f"/app/sessions/{user_id}_blacklist"
 
+    # Проверяем, не идёт ли уже поиск для этого пользователя
+    searching: set = context.bot_data.setdefault("blacklist_searching", set())
+    if user_id in searching:
+        await update.message.reply_text(
+            "⏳ <b>Проверка уже выполняется</b>\n\n"
+            "Одновременно по чёрному списку может проверяться только один пользователь.\n"
+            "Пожалуйста, подождите завершения поиска и введите запрос повторно.",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    searching.add(user_id)
+
+    back_keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(BlacklistBtn.CHECK)],
+        [KeyboardButton(MenuButton.BACK)],
+    ], resize_keyboard=True)
+
     fio_line = f"\n<b>ФИО:</b> {fio}" if fio else ""
     await update.message.reply_text(
         f"🔍 Поиск запущен:\n"
         f"<b>Никнейм:</b> {normalized_username}{fio_line}\n\n"
         "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
+        reply_markup=back_keyboard,
         parse_mode="HTML",
     )
 
@@ -273,6 +306,7 @@ async def receive_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         workers_api=workers_api,
         db=db,
         blacklist_session_path=blacklist_session_path,
+        bot_data=context.bot_data,
     ))
 
     return ConversationHandler.END
@@ -350,7 +384,7 @@ async def show_manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
-        logger.error(f"Ошибка получения чатов ЧС: {e}")
+        logger.exception("Ошибка получения чатов ЧС")
         await update.callback_query.answer("❌ Ошибка получения списка", show_alert=True)
 
 
@@ -446,33 +480,20 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             # Не форум — сохраняем сразу
             chat_title = topics_result.get("chat_title", "")
-            result = await workers_api.add_blacklist_chat(normalized_username, chat_title=chat_title)
+            await workers_api.add_blacklist_chat(normalized_username, chat_title=chat_title)
             await status_msg.edit_text(
                 f"✅ Чат {normalized_username} добавлен в черный список!"
             )
             return ConversationHandler.END
 
-    except Exception as e:
-        logger.error(f"Ошибка добавления чата в ЧС: {e}")
-
-        # Определяем: ошибка авторизации или другая?
-        is_auth_error = False
-        try:
-            detail = e.response.json().get("detail", "").lower()
-            is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
-        except Exception:
-            is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
-
+    except HTTPStatusError as e:
+        detail = e.response.json().get("detail", "").lower()
+        is_auth_error = any(kw in detail for kw in ["authkeyinvalid", "unauthorized", "not authorized"])
         if is_auth_error:
             logger.warning(f"Обнаружен обрыв авторизации blacklist для user {user_id}")
-
-            # Сбросить статус авторизации в БД
             db: DatabaseService = context.bot_data["db"]
             await db.update_auth_status(user_id, "blacklist", False)
-
-            # Очистить данные пользователя
             context.user_data.clear()
-
             await status_msg.edit_text(
                 "⚠️ <b>Авторизация оборвана</b>\n\n"
                 "Произошла ошибка со стороны Telegram.\n"
@@ -480,9 +501,24 @@ async def receive_add_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 parse_mode="HTML"
             )
         else:
+            await status_msg.edit_text(f"❌ Ошибка:\n\n{str(e)}")
+        return ConversationHandler.END
+    except Exception as e:
+        logger.exception(f"Ошибка добавления чата в ЧС для user {user_id}")
+        is_auth_error = any(kw in str(e).lower() for kw in ["authkeyinvalid", "unauthorized"])
+        if is_auth_error:
+            logger.warning(f"Обнаружен обрыв авторизации blacklist для user {user_id}")
+            db: DatabaseService = context.bot_data["db"]
+            await db.update_auth_status(user_id, "blacklist", False)
+            context.user_data.clear()
             await status_msg.edit_text(
-                f"❌ Ошибка:\n\n{str(e)}"
+                "⚠️ <b>Авторизация оборвана</b>\n\n"
+                "Произошла ошибка со стороны Telegram.\n"
+                "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\".",
+                parse_mode="HTML"
             )
+        else:
+            await status_msg.edit_text(f"❌ Ошибка:\n\n{str(e)}")
         return ConversationHandler.END
 
 
@@ -500,13 +536,13 @@ async def receive_topic_selection(update: Update, context: ContextTypes.DEFAULT_
     if data == BlacklistCB.SELECT_ALL_TOPICS:
         # Пользователь выбрал "Весь чат" — сохраняем без topic_id
         try:
-            result = await workers_api.add_blacklist_chat(chat_username, chat_title=chat_title)
+            await workers_api.add_blacklist_chat(chat_username, chat_title=chat_title)
             await query.edit_message_text(
                 f"✅ Чат {chat_username} добавлен в черный список!\n"
                 f"(все топики)"
             )
         except Exception as e:
-            logger.error(f"Ошибка добавления чата в ЧС: {e}")
+            logger.exception("Ошибка добавления чата в ЧС")
             await query.edit_message_text(f"❌ Ошибка:\n\n{str(e)}")
 
     elif data.startswith(BlacklistCB.SELECT_TOPIC):
@@ -516,7 +552,7 @@ async def receive_topic_selection(update: Update, context: ContextTypes.DEFAULT_
         topic_name = topics_map.get(topic_id, f"Topic {topic_id}")
 
         try:
-            result = await workers_api.add_blacklist_chat(
+            await workers_api.add_blacklist_chat(
                 chat_username,
                 chat_title=chat_title,
                 topic_id=topic_id,
@@ -528,7 +564,7 @@ async def receive_topic_selection(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode="HTML",
             )
         except Exception as e:
-            logger.error(f"Ошибка добавления чата в ЧС: {e}")
+            logger.exception("Ошибка добавления чата в ЧС")
             await query.edit_message_text(f"❌ Ошибка:\n\n{str(e)}")
 
     # Очищаем user_data
@@ -555,17 +591,17 @@ async def remove_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workers_api: WorkersAPI = context.bot_data["workers_api"]
 
     try:
-        result = await workers_api.remove_blacklist_chat(chat_username, topic_id=topic_id)
+        await workers_api.remove_blacklist_chat(chat_username, topic_id=topic_id)
         await query.answer(f"✅ Чат {chat_username} удалён")
         await show_manage_chats(update, context)
 
     except Exception as e:
-        logger.error(f"Ошибка удаления чата из ЧС: {e}")
+        logger.exception("Ошибка удаления чата из ЧС")
         await query.answer("❌ Ошибка удаления", show_alert=True)
 
 
 async def cancel_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отмена операции"""
+    """ операции"""
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("❌ Операция отменена.")
