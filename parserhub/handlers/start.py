@@ -104,8 +104,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton(MenuButton.ACCOUNT)],
         [KeyboardButton(MenuButton.REALTY)],
         [KeyboardButton(MenuButton.WORKERS)],
-        [KeyboardButton(MenuButton.SETTINGS)],
     ]
+
+    if not is_admin:
+        keyboard.append([KeyboardButton(MenuButton.SUBSCRIPTION)])
+
+    keyboard.append([KeyboardButton(MenuButton.SETTINGS)])
 
     if is_admin:
         keyboard.append([KeyboardButton(MenuButton.ADMIN)])
