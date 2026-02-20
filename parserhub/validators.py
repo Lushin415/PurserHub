@@ -211,6 +211,61 @@ class Validators:
         return True, username, None
 
     @staticmethod
+    def validate_fio(fio: str) -> Tuple[bool, str, Optional[str]]:
+        """
+        Валидация ФИО (Фамилия Имя Отчество)
+        Returns: (valid, normalized_fio, error_message)
+        """
+        fio = fio.strip()
+
+        if not fio:
+            return False, fio, "❌ ФИО не может быть пустым"
+
+        # Перепутали поля — ввели никнейм
+        if fio.startswith('@'):
+            return False, fio, (
+                "❌ Здесь нужно ввести ФИО, а не никнейм.\n"
+                "Пример: <i>Иванов Иван Иванович</i>"
+            )
+
+        # Латиница
+        if re.search(r'[A-Za-z]', fio):
+            return False, fio, (
+                "❌ ФИО должно содержать только кириллицу.\n"
+                "Пример: <i>Иванов Иван Иванович</i>"
+            )
+
+        # Цифры
+        if re.search(r'\d', fio):
+            return False, fio, "❌ ФИО не должно содержать цифры"
+
+        # Недопустимые спецсимволы (разрешены: кириллица, пробелы, дефис)
+        if re.search(r'[^А-ЯЁа-яё\s\-]', fio):
+            return False, fio, (
+                "❌ ФИО содержит недопустимые символы.\n"
+                "Разрешены только кириллица и дефис"
+            )
+
+        words = fio.split()
+
+        if len(words) > 3:
+            return False, fio, (
+                "❌ Слишком много слов (максимум 3).\n"
+                "Введите: <i>Фамилия</i>, <i>Фамилия Имя</i> "
+                "или <i>Фамилия Имя Отчество</i>"
+            )
+
+        # Каждое слово: кириллица + дефис внутри (двойная фамилия)
+        word_pattern = re.compile(r'^[А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)*$')
+        for word in words:
+            if len(word) < 2:
+                return False, fio, f"❌ Слово «{word}» слишком короткое (минимум 2 символа)"
+            if not word_pattern.match(word):
+                return False, fio, f"❌ Слово «{word}» содержит недопустимые символы"
+
+        return True, fio, None
+
+    @staticmethod
     def validate_chats_list(chats: list[str]) -> Tuple[bool, list[str], Optional[str]]:
         """
         Валидация списка чатов

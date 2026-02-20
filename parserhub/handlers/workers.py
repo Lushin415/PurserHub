@@ -1,6 +1,7 @@
 """Обработчики мониторинга ПВЗ"""
+import asyncio
 from datetime import datetime, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import BadRequest
 from telegram.ext import (
     ContextTypes,
@@ -489,7 +490,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
-            "📋 <b>Мои задачи</b>\n\n"
+            "📋 <b>Мои задачи поиска сотрудников</b>\n\n"
             "У вас нет активных задач."
         )
 
@@ -515,7 +516,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
-        f"📋 <b>Мои задачи</b> ({len(tasks)})\n\n"
+        f"📋 <b>Мои задачи поиска сотрудников</b> ({len(tasks)})\n\n"
         "Выберите задачу для просмотра:"
     )
 
@@ -667,48 +668,17 @@ async def stop_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_my_tasks(update, context)
 
 
-async def handle_notification_blacklist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопки 'Проверить в ЧС' из уведомления workers-service"""
-    query = update.callback_query
-    user_id = update.effective_user.id
-    db: DatabaseService = context.bot_data["db"]
-
-    user = await db.get_user(user_id)
-    if not user or not user.is_blacklist_authorized:
-        await query.answer("Аккаунт ЧС не авторизован", show_alert=True)
-        await query.message.reply_text(
-            "⚫ <b>Черный список</b>\n\n"
-            "❌ Для работы необходимо авторизовать аккаунт черного списка.\n\n"
-            "Перейдите в «👤 Мой аккаунт» для авторизации.",
-            parse_mode="HTML",
-        )
-        return
-
-    # Проверяем, не идёт ли уже поиск для этого пользователя (защита при concurrent обработке)
-    searching: set = context.bot_data.setdefault("blacklist_searching", set())
-    if user_id in searching:
-        await query.answer()
-        await query.message.reply_text(
-            "⏳ <b>Проверка уже выполняется</b>\n\n"
-            "Одновременно по чёрному списку может проверяться только один пользователь.\n"
-            "Пожалуйста, подождите завершения поиска и попробуйте снова.",
-            parse_mode="HTML",
-        )
-        return
-
-    await query.answer("Поиск в черном списке...")
-    searching.add(user_id)
-
+async def _notification_blacklist_task(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    item_id: int,
+    workers_api: WorkersAPI,
+    bot_data: dict,
+):
+    """Фоновая задача проверки в ЧС из уведомления — выполняется без блокировки бота"""
     try:
-        item_id = int(query.data.split(":")[1])
-        workers_api: WorkersAPI = context.bot_data["workers_api"]
-
-        search_msg = await query.message.reply_text("🔍 Поиск в черном списке...")
-
         result = await workers_api.check_blacklist_by_item(item_id)
-
-        await search_msg.delete()
-        await query.edit_message_reply_markup(reply_markup=None)
 
         check_result = result.get("result", {})
         if check_result.get("found"):
@@ -725,26 +695,76 @@ async def handle_notification_blacklist_check(update: Update, context: ContextTy
             parts.append("")
             parts.append("🔗 Сообщение в ЧС:")
             parts.append(check_result.get("message_link", ""))
-            await query.message.reply_text("\n".join(parts), disable_web_page_preview=False)
+            await bot.send_message(chat_id=chat_id, text="\n".join(parts), disable_web_page_preview=False)
         else:
-            await query.message.reply_text("✅ В черном списке НЕ найден")
+            await bot.send_message(chat_id=chat_id, text="✅ В черном списке НЕ найден")
 
     except HTTPStatusError as e:
-        if e.response.status_code == 500:
-            await query.message.reply_text(
-                "⏳ <b>Проверка уже выполняется</b>\n\n"
-                "Одновременно по чёрному списку может проверяться только один пользователь.\n"
-                "Пожалуйста, подождите завершения поиска и попробуйте снова.",
-                parse_mode="HTML",
-            )
-        else:
-            logger.exception("Ошибка проверки ЧС из уведомления")
-            await query.message.reply_text(f"❌ Ошибка проверки: {e}")
+        logger.exception(f"Ошибка фоновой проверки ЧС из уведомления для item {item_id}")
+        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка проверки: {e}")
     except Exception as e:
-        logger.exception("Ошибка проверки ЧС из уведомления")
-        await query.message.reply_text(f"❌ Ошибка проверки: {e}")
+        logger.exception(f"Ошибка фоновой проверки ЧС из уведомления для item {item_id}")
+        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка проверки: {e}")
     finally:
-        searching.discard(user_id)
+        bot_data.get("blacklist_searching", set()).discard(user_id)
+
+
+async def handle_notification_blacklist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопки 'Проверить в ЧС' из уведомления workers-service"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    db: DatabaseService = context.bot_data["db"]
+
+    user = await db.get_user(user_id)
+    if not user or not user.is_blacklist_authorized:
+        await query.answer("Аккаунт ЧС не авторизован", show_alert=True)
+        await query.message.reply_text(
+            "⚫ <b>Черный список</b>\n\n"
+            "❌ Для работы необходимо авторизовать аккаунт черного списка.\n\n"
+            "Перейдите в «👤 Мой аккаунт» для авторизации.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Проверяем, не идёт ли уже поиск для этого пользователя
+    searching: set = context.bot_data.setdefault("blacklist_searching", set())
+    if user_id in searching:
+        await query.answer()
+        await query.message.reply_text(
+            "⏳ <b>Проверка уже выполняется</b>\n\n"
+            "Одновременно по чёрному списку может проверяться только один пользователь.\n"
+            "Пожалуйста, подождите завершения поиска и попробуйте снова.",
+            parse_mode="HTML",
+        )
+        return
+
+    item_id = int(query.data.split(":")[1])
+    workers_api: WorkersAPI = context.bot_data["workers_api"]
+
+    await query.answer("Поиск в черном списке запущен")
+    searching.add(user_id)
+
+    # Убираем кнопки с уведомления, чтобы нельзя было нажать повторно
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await query.message.reply_text(
+        "🔍 <b>Поиск в черном списке запущен</b>\n\n"
+        "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
+        parse_mode="HTML",
+    )
+
+    asyncio.create_task(_notification_blacklist_task(
+        bot=context.bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        item_id=item_id,
+        workers_api=workers_api,
+        bot_data=context.bot_data,
+    ))
 
 
 async def handle_notification_ignore(update: Update, context: ContextTypes.DEFAULT_TYPE):

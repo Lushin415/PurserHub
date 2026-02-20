@@ -110,13 +110,14 @@ class WorkersAPI:
             logger.error(f"Ошибка проверки ЧС для объявления {item_id}: {e}")
             raise
 
-    async def check_blacklist(self, username: str, blacklist_session_path: str, fio: str | None = None) -> dict:
+    async def check_blacklist(self, username: str | None, blacklist_session_path: str, fio: str | None = None) -> dict:
         """POST /blacklist/check - Проверка в ЧС (3 ступени: username → user_id → ФИО)"""
         url = f"{self.base_url}/blacklist/check"
         params = {
-            "username": username,
             "blacklist_session_path": blacklist_session_path,
         }
+        if username:  # пропускаем None и пустую строку
+            params["username"] = username
         if fio:
             params["fio"] = fio
 

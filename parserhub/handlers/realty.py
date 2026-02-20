@@ -328,7 +328,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
-            "📋 <b>Мои задачи</b>\n\n"
+            "📋 <b>Мои задачи поиска объявлений</b>\n\n"
             "У вас нет активных задач мониторинга."
         )
 
@@ -366,7 +366,7 @@ async def show_my_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
-        f"📋 <b>Мои задачи поиска сотрудников</b> ({len(tasks)})\n\n"
+        f"📋 <b>Мои задачи поиска объявлений</b> ({len(tasks)})\n\n"
         "Выберите задачу для просмотра:"
     )
 

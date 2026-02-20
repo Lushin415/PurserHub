@@ -1,4 +1,4 @@
-# ScanBot — Quick Start Guide
+# commercebot — Quick Start Guide
 
 ---
 
@@ -73,7 +73,7 @@ docker compose version
 
 ```bash
 # Создать рабочую директорию
-mkdir -p /opt/scanbot && cd /opt/scanbot
+mkdir -p /opt/commercebot && cd /opt/commercebot
 
 # Клонировать все три репозитория
 git clone https://github.com/Lushin415/PurserHub.git
@@ -81,7 +81,7 @@ git clone https://github.com/Lushin415/workers_service.git
 git clone https://github.com/Lushin415/parser_avito_cian.git
 
 # Должна получиться такая структура:
-# /opt/scanbot/
+# /opt/commercebot/
 # ├── PurserHub/
 # ├── workers_service/
 # └── parser_avito_cian/
@@ -90,7 +90,7 @@ git clone https://github.com/Lushin415/parser_avito_cian.git
 ### Шаг 3 — Подготовить окружение (один скрипт)
 
 ```bash
-cd /opt/scanbot/PurserHub
+cd /opt/commercebot/PurserHub
 bash setup.sh
 ```
 
@@ -99,7 +99,7 @@ bash setup.sh
 ### Шаг 4 — Заполнить .env файлы
 
 ```bash
-nano /opt/scanbot/PurserHub/.env
+nano /opt/commercebot/PurserHub/.env
 ```
 ```env
 BOT_TOKEN=токен_от_BotFather
@@ -109,7 +109,7 @@ API_HASH=ваш_api_hash
 ```
 
 ```bash
-nano /opt/scanbot/workers_service/.env
+nano /opt/commercebot/workers_service/.env
 ```
 ```env
 API_ID=ваш_api_id      # те же, что в PurserHub
@@ -119,7 +119,7 @@ API_HASH=ваш_api_hash
 ### Шаг 5 — Запустить
 
 ```bash
-cd /opt/scanbot/PurserHub
+cd /opt/commercebot/PurserHub
 docker compose up -d
 
 # Проверить, что все три контейнера запущены

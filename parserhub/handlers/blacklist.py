@@ -40,6 +40,7 @@ class BlacklistCB:
 class BlacklistBtn:
     CHECK = "🔍 Проверить пользователя"
     SKIP_FIO = "⏩ Пропустить"
+    FIO_ONLY = "👤 Только по ФИО"
 
 
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,6 +98,7 @@ async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"[BLACKLIST] start_check_user вызван от user {update.effective_user.id}")
 
     keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton(BlacklistBtn.FIO_ONLY)],
         [KeyboardButton(MenuButton.CANCEL)],
     ], resize_keyboard=True)
 
@@ -104,6 +106,7 @@ async def start_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "🔍 <b>Проверка в чёрном списке</b>\n\n"
         "Введите username для проверки:\n"
         "<code>@username</code>\n\n"
+        "Если аккаунта Telegram нет — нажмите «👤 Только по ФИО».\n\n"
         "⏳ <i>Поиск занимает несколько минут — бот пришлёт результат автоматически.</i>",
         reply_markup=keyboard,
         parse_mode="HTML",
@@ -116,8 +119,8 @@ async def _blacklist_search_task(
     bot: Bot,
     chat_id: int,
     user_id: int,
-    username: str,
-    normalized_username: str,
+    username: str | None,
+    normalized_username: str | None,
     fio: str | None,
     workers_api: WorkersAPI,
     db: DatabaseService,
@@ -170,11 +173,15 @@ async def _blacklist_search_task(
                 f"<b>Текст записи:</b>\n<i>{msg_text}</i>"
             )
         else:
-            steps = result.get("steps_done", ["по никнейму"])
-            steps_text = ", ".join(steps)
+            steps = result.get("steps_done", [])
+            steps_text = ", ".join(steps) if steps else "—"
+            if username:
+                identity_line = f"<b>Username:</b> {username}\n"
+            else:
+                identity_line = f"<b>ФИО:</b> {fio}\n" if fio else ""
             text = (
                 "✅ <b>Пользователь НЕ найден в черном списке</b>\n\n"
-                f"<b>Username:</b> {username}\n"
+                f"{identity_line}"
                 f"<b>Проверено:</b> {steps_text}\n"
                 f"<b>Сообщений проверено:</b> {result.get('messages_checked', 0)}\n"
                 f"<b>Чатов проверено:</b> {len(result.get('chats_checked', []))}"
@@ -219,10 +226,29 @@ async def _blacklist_search_task(
 
 
 async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен username — валидируем и просим ввести ФИО"""
-    username = update.message.text.strip()
+    """Получен username или кнопка FIO_ONLY — переходим к шагу ФИО"""
+    text = update.message.text.strip()
 
-    valid, normalized_username, error = Validators.validate_username(username)
+    # Режим «только по ФИО» — нет Telegram аккаунта
+    if text == BlacklistBtn.FIO_ONLY:
+        context.user_data["bl_username"] = ""  # sentinel: FIO-only режим
+
+        keyboard = ReplyKeyboardMarkup([
+            [KeyboardButton(MenuButton.CANCEL)],
+        ], resize_keyboard=True)
+
+        await update.message.reply_text(
+            "👤 <b>Поиск только по ФИО</b>\n\n"
+            "Введите ФИО:\n"
+            "<i>Иванов Иван Иванович</i>\n"
+            "или <i>Иванов Иван</i>, или только <i>Иванов</i>",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+        return BlacklistState.WAITING_FIO
+
+    # Обычный режим — валидируем username
+    valid, normalized_username, error = Validators.validate_username(text)
     if not valid:
         await update.message.reply_text(
             f"{error}\n\n"
@@ -253,17 +279,47 @@ async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def receive_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получен ФИО (или пропуск) — запускаем поиск в ЧС в фоне"""
+    """Получен ФИО (или пропуск) — валидируем и запускаем поиск в ЧС в фоне"""
     text = update.message.text.strip()
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    normalized_username = context.user_data.pop("bl_username", None)
-    if not normalized_username:
+    # Проверяем, что сессия диалога существует (bl_username должен быть задан на шаге username)
+    if "bl_username" not in context.user_data:
         await update.message.reply_text("❌ Ошибка сессии. Начните заново.")
         return ConversationHandler.END
 
-    fio = None if text == BlacklistBtn.SKIP_FIO else text
+    # Читаем без pop — pop сделаем только когда все проверки пройдены
+    normalized_username = context.user_data["bl_username"]
+    fio_only = not normalized_username  # "" → FIO-only режим
+
+    # Обработка кнопки «Пропустить»
+    if text == BlacklistBtn.SKIP_FIO:
+        if fio_only:
+            # В FIO-only режиме пользователь не должен видеть эту кнопку,
+            # но защищаемся на случай ручного ввода текста
+            await update.message.reply_text(
+                "❌ В режиме поиска по ФИО необходимо ввести хотя бы фамилию.\n\n"
+                "Введите ФИО:\n"
+                "<i>Иванов Иван Иванович</i>",
+                parse_mode="HTML",
+            )
+            return BlacklistState.WAITING_FIO  # bl_username остаётся в context
+        fio = None
+    else:
+        # Валидируем ФИО в обоих режимах
+        valid, normalized_fio, error = Validators.validate_fio(text)
+        if not valid:
+            skip_hint = "" if fio_only else "\n\nЕсли ФИО неизвестно — нажмите «⏩ Пропустить»"
+            await update.message.reply_text(
+                f"{error}{skip_hint}",
+                parse_mode="HTML",
+            )
+            return BlacklistState.WAITING_FIO  # bl_username остаётся в context
+        fio = normalized_fio
+
+    # Все проверки пройдены — извлекаем из context
+    context.user_data.pop("bl_username")
 
     workers_api: WorkersAPI = context.bot_data["workers_api"]
     db: DatabaseService = context.bot_data["db"]
@@ -287,21 +343,30 @@ async def receive_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         [KeyboardButton(MenuButton.BACK)],
     ], resize_keyboard=True)
 
-    fio_line = f"\n<b>ФИО:</b> {fio}" if fio else ""
+    # Формируем сообщение о запуске в зависимости от режима
+    if fio_only:
+        search_info = f"<b>ФИО:</b> {fio}"
+    else:
+        fio_line = f"\n<b>ФИО:</b> {fio}" if fio else ""
+        search_info = f"<b>Никнейм:</b> {normalized_username}{fio_line}"
+
     await update.message.reply_text(
         f"🔍 Поиск запущен:\n"
-        f"<b>Никнейм:</b> {normalized_username}{fio_line}\n\n"
+        f"{search_info}\n\n"
         "⏳ <i>Результат придёт автоматически — можете пользоваться ботом.</i>",
         reply_markup=back_keyboard,
         parse_mode="HTML",
     )
 
+    # Для API: пустая строка → None
+    api_username = normalized_username or None
+
     asyncio.create_task(_blacklist_search_task(
         bot=context.bot,
         chat_id=chat_id,
         user_id=user_id,
-        username=normalized_username,
-        normalized_username=normalized_username,
+        username=api_username,
+        normalized_username=api_username,
         fio=fio,
         workers_api=workers_api,
         db=db,
