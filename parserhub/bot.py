@@ -149,12 +149,9 @@ async def post_shutdown(application: Application):
     """Очистка при остановке бота"""
     logger.info("Остановка бота...")
 
-    # Сбросить зависшие задачи в БД
-    if "db" in application.bot_data:
-        db: DatabaseService = application.bot_data["db"]
-        removed = await db.clear_running_tasks()
-        if removed:
-            logger.info(f"Очищено зависших задач: {removed}")
+    # НЕ удаляем active_tasks при shutdown — задачи в сервисах восстанавливаются сами
+    # после рестарта (workers-service из 'paused', realty-monitor из 'suspended').
+    # _reconcile_tasks при следующем post_init очистит настоящие зомби (404 от сервиса).
 
     # Закрыть HTTP клиенты
     if "workers_api" in application.bot_data:
