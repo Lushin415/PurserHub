@@ -170,6 +170,43 @@ class SubscriptionService:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
+    async def revoke(self, user_id: int) -> bool:
+        """Аннулировать подписку и пробный период пользователя.
+        Возвращает True если у пользователя было что-то активное."""
+        past = "2000-01-01T00:00:00"
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor_sub = await db.execute(
+                "DELETE FROM subscriptions WHERE user_id = ?", (user_id,)
+            )
+            sub_deleted = cursor_sub.rowcount > 0
+            cursor_trial = await db.execute(
+                "UPDATE users SET trial_until = ? WHERE user_id = ?", (past, user_id)
+            )
+            trial_reset = cursor_trial.rowcount > 0
+            await db.commit()
+        logger.info(f"Subscription revoked for user={user_id}, had_sub={sub_deleted}, had_trial={trial_reset}")
+        return sub_deleted or trial_reset
+
+    async def get_all_trial_active(self) -> list[dict]:
+        """Получить всех пользователей с активным пробным периодом (без платной подписки)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            now = datetime.utcnow().isoformat()
+            async with db.execute(
+                """
+                SELECT u.user_id, u.username, u.full_name, u.trial_until
+                FROM users u
+                WHERE u.trial_until > ?
+                  AND u.user_id NOT IN (
+                      SELECT user_id FROM subscriptions WHERE active_until > ?
+                  )
+                ORDER BY u.trial_until DESC
+                """,
+                (now, now),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
     async def delete_expired(self) -> int:
         """Удалить истекшие подписки. Возвращает количество удалённых."""
         async with aiosqlite.connect(self.db_path) as db:

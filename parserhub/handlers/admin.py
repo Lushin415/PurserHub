@@ -43,6 +43,9 @@ class AdminCB:
     PROXY_DELETE_CONFIRM = "admin_proxy_delete_confirm"
     PROXY_RESTART = "admin_proxy_restart"
     PROXY_RESTART_CONFIRM = "admin_proxy_restart_confirm"
+    REVOKE_SUB = "admin_revoke"
+    SUBS_PAGE = "admin_subs_p_"  # + page number
+    NOOP = "admin_noop"
     CLOSE = "admin_close"
 
 
@@ -61,6 +64,8 @@ class AdminState:
     CONFIRM_CLEAR_PVZ = 12
     BL_CHATS_MENU = 13
     CONFIRM_CLEAR_BL = 14
+    INPUT_USER_FOR_REVOKE = 15
+    CONFIRM_REVOKE = 16
 
 
 async def _is_admin(user_id: int, db: DatabaseService) -> bool:
@@ -101,6 +106,7 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📋 Подписки", callback_data=AdminCB.SUBSCRIPTIONS)],
         [InlineKeyboardButton("🎁 Выдать подписку", callback_data=AdminCB.GRANT_SUB)],
+        [InlineKeyboardButton("❌ Аннулировать подписку", callback_data=AdminCB.REVOKE_SUB)],
         [InlineKeyboardButton("💰 Цены подписок", callback_data=AdminCB.MANAGE_PRICES)],
         [InlineKeyboardButton("💰 Доходы", callback_data=AdminCB.REVENUE)],
         [InlineKeyboardButton("👥 Администраторы", callback_data=AdminCB.ADMINS_LIST)],
@@ -126,34 +132,93 @@ async def _show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Список подписок =====
 
+_SUBS_PAGE_SIZE = 20
+
+
+def _build_subs_page(
+    subs: list, trials: list, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Построить одну страницу списка активных пользователей."""
+    # Объединяем: сначала платные, затем пробные
+    all_entries = [{**s, "type": "sub"} for s in subs] + \
+                  [{**t, "type": "trial"} for t in trials]
+
+    total = len(all_entries)
+    total_pages = max(1, (total + _SUBS_PAGE_SIZE - 1) // _SUBS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    now = datetime.now(timezone.utc)
+    page_entries = all_entries[page * _SUBS_PAGE_SIZE: (page + 1) * _SUBS_PAGE_SIZE]
+
+    header = (
+        f"📋 <b>Все активные пользователи</b> ({total})\n"
+        f"💳 Платные: {len(subs)}   🎁 Пробный: {len(trials)}\n"
+    )
+    lines = []
+    for e in page_entries:
+        name = e.get("username") or e.get("full_name") or "?"
+        if e["type"] == "sub":
+            until = datetime.fromisoformat(e["active_until"]).replace(tzinfo=timezone.utc)
+            remaining = until - now
+            lines.append(
+                f"• 💳 <code>{e['user_id']}</code> @{name} — "
+                f"{e['plan']} (ост. {remaining.days}д {remaining.seconds // 3600}ч)"
+            )
+        else:
+            until = datetime.fromisoformat(e["trial_until"]).replace(tzinfo=timezone.utc)
+            remaining = until - now
+            lines.append(
+                f"• 🎁 <code>{e['user_id']}</code> @{name} "
+                f"(ост. {remaining.days}д {remaining.seconds // 3600}ч)"
+            )
+
+    if not lines:
+        lines.append("Нет активных пользователей.")
+
+    text = header + "\n" + "\n".join(lines)
+
+    # Навигация
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"{AdminCB.SUBS_PAGE}{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=AdminCB.NOOP))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"{AdminCB.SUBS_PAGE}{page + 1}"))
+
+    keyboard = []
+    if total_pages > 1:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=AdminCB.MENU)])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Список всех активных подписок"""
+    """Список всех активных подписок и пробных периодов (страница 0)"""
     query = update.callback_query
     await query.answer()
 
     service: SubscriptionService = context.bot_data["subscription"]
     subs = await service.get_all_active()
+    trials = await service.get_all_trial_active()
 
-    if not subs:
-        text = "📋 <b>Активные подписки</b>\n\nНет активных подписок."
-    else:
-        lines = []
-        for s in subs[:30]:
-            until = datetime.fromisoformat(s["active_until"]).replace(tzinfo=timezone.utc)
-            remaining = until - datetime.now(timezone.utc)
-            name = s.get("username") or s.get("full_name") or "?"
-            lines.append(
-                f"• <code>{s['user_id']}</code> @{name} — "
-                f"{s['plan']} (ост. {remaining.days}д)"
-            )
-        text = f"📋 <b>Активные подписки</b> ({len(subs)})\n\n" + "\n".join(lines)
+    text, markup = _build_subs_page(subs, trials, page=0)
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode="HTML")
 
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=AdminCB.MENU)]]
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML",
-    )
+
+async def show_subscriptions_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переход на страницу N списка подписок"""
+    query = update.callback_query
+    await query.answer()
+
+    page = int(query.data.replace(AdminCB.SUBS_PAGE, ""))
+
+    service: SubscriptionService = context.bot_data["subscription"]
+    subs = await service.get_all_active()
+    trials = await service.get_all_trial_active()
+
+    text, markup = _build_subs_page(subs, trials, page=page)
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode="HTML")
 
 
 # ===== Выдать подписку =====
@@ -229,6 +294,117 @@ async def grant_sub_select_plan(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
+# ===== Аннулировать подписку =====
+
+async def revoke_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало: запрос user_id для аннулирования"""
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")]]
+    await query.edit_message_text(
+        "❌ <b>Аннулировать подписку</b>\n\n"
+        "Введите Telegram ID пользователя:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return AdminState.INPUT_USER_FOR_REVOKE
+
+
+async def revoke_sub_receive_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получен user_id — показать текущий статус и запросить подтверждение"""
+    text = update.message.text.strip()
+
+    try:
+        user_id = int(text)
+    except ValueError:
+        await update.message.reply_text("Введите числовой Telegram ID.")
+        return AdminState.INPUT_USER_FOR_REVOKE
+
+    db: DatabaseService = context.bot_data["db"]
+    if not await db.get_user(user_id):
+        await update.message.reply_text(
+            f"❌ Пользователь <code>{user_id}</code> не найден в базе данных.",
+            parse_mode="HTML",
+        )
+        return AdminState.INPUT_USER_FOR_REVOKE
+
+    context.user_data["admin_revoke_user_id"] = user_id
+
+    service: SubscriptionService = context.bot_data["subscription"]
+    sub = await service.get_info(user_id)
+    trial = await service.get_trial_info(user_id)
+
+    now = datetime.now(timezone.utc)
+    status_lines = []
+    if sub:
+        until = datetime.fromisoformat(sub["active_until"]).replace(tzinfo=timezone.utc)
+        if until > now:
+            remaining = until - now
+            status_lines.append(f"💳 Платная подписка: {sub['plan']} (ост. {remaining.days}д {remaining.seconds // 3600}ч)")
+        else:
+            status_lines.append("💳 Платная подписка: истекла")
+    if trial and trial["is_active"]:
+        trial_until = datetime.fromisoformat(trial["trial_until"]).replace(tzinfo=timezone.utc)
+        remaining = trial_until - now
+        status_lines.append(f"🎁 Пробный период: ост. {remaining.days}д {remaining.seconds // 3600}ч")
+
+    if not status_lines:
+        status_lines.append("нет активного доступа")
+
+    status_text = "\n".join(status_lines)
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, аннулировать", callback_data="admin_revoke_ok")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="admin_conv_cancel")],
+    ]
+    await update.message.reply_text(
+        f"Пользователь: <code>{user_id}</code>\n"
+        f"Текущий статус:\n{status_text}\n\n"
+        "Аннулировать подписку и пробный период?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return AdminState.CONFIRM_REVOKE
+
+
+async def revoke_sub_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение — аннулировать"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = context.user_data.get("admin_revoke_user_id")
+    if user_id is None:
+        await query.edit_message_text(
+            "❌ Ошибка: ID пользователя утерян (возможно, бот перезапускался). "
+            "Начните заново через меню администратора."
+        )
+        return ConversationHandler.END
+
+    service: SubscriptionService = context.bot_data["subscription"]
+
+    try:
+        had_access = await service.revoke(user_id)
+        if had_access:
+            await query.edit_message_text(
+                f"✅ Подписка аннулирована!\n\n"
+                f"Пользователь <code>{user_id}</code> лишён доступа.",
+                parse_mode="HTML",
+            )
+            logger.info(f"Admin revoked subscription: user={user_id}")
+        else:
+            await query.edit_message_text(
+                f"ℹ️ У пользователя <code>{user_id}</code> не было активной подписки или пробного периода.",
+                parse_mode="HTML",
+            )
+            logger.info(f"Admin revoke: user={user_id} had no active access")
+    except Exception as e:
+        logger.exception("Ошибка аннулирования подписки")
+        await query.edit_message_text(f"❌ Ошибка: {e}")
+
+    return ConversationHandler.END
+
+
 # ===== Доходы =====
 
 async def show_revenue(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,13 +416,16 @@ async def show_revenue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = await db.get_revenue_stats()
     service: SubscriptionService = context.bot_data["subscription"]
     subs = await service.get_all_active()
+    trials = await service.get_all_trial_active()
 
     text = (
         "💰 <b>Доходы</b>\n\n"
         f"<b>Сегодня:</b> {stats['today_amount'] / 100:.0f} RUB ({stats['today_count']} оплат)\n"
         f"<b>Этот месяц:</b> {stats['month_amount'] / 100:.0f} RUB ({stats['month_count']} оплат)\n"
         f"<b>Всего:</b> {stats['total_amount'] / 100:.0f} RUB ({stats['total_count']} оплат)\n\n"
-        f"<b>Активных подписок:</b> {len(subs)}"
+        f"<b>Активных подписок:</b> {len(subs)}\n"
+        f"<b>На пробном периоде:</b> {len(trials)}\n"
+        f"<b>Итого пользователей:</b> {len(subs) + len(trials)}"
     )
 
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=AdminCB.MENU)]]
@@ -1026,6 +1205,11 @@ def _build_chats_conv(
     )
 
 
+async def _noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Заглушка для кнопки с номером страницы — просто отвечает на callback."""
+    await update.callback_query.answer()
+
+
 def register_admin_handlers(app):
     """Регистрация обработчиков админки"""
     # Команда /admin
@@ -1034,8 +1218,10 @@ def register_admin_handlers(app):
     # Возврат в меню
     app.add_handler(CallbackQueryHandler(admin_menu_callback, pattern=f"^{AdminCB.MENU}$"))
 
-    # Список подписок
+    # Список подписок + пагинация
     app.add_handler(CallbackQueryHandler(show_subscriptions, pattern=f"^{AdminCB.SUBSCRIPTIONS}$"))
+    app.add_handler(CallbackQueryHandler(show_subscriptions_page, pattern=f"^{AdminCB.SUBS_PAGE}\\d+$"))
+    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=f"^{AdminCB.NOOP}$"))
 
     # Доходы
     app.add_handler(CallbackQueryHandler(show_revenue, pattern=f"^{AdminCB.REVENUE}$"))
@@ -1069,6 +1255,29 @@ def register_admin_handlers(app):
         allow_reentry=True,
     )
     app.add_handler(grant_conv)
+
+    # ConversationHandler: аннулировать подписку
+    revoke_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(revoke_sub_start, pattern=f"^{AdminCB.REVOKE_SUB}$")
+        ],
+        states={
+            AdminState.INPUT_USER_FOR_REVOKE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~MAIN_MENU_FILTER, revoke_sub_receive_user)
+            ],
+            AdminState.CONFIRM_REVOKE: [
+                CallbackQueryHandler(revoke_sub_confirm, pattern="^admin_revoke_ok$")
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_admin_conv, pattern="^admin_conv_cancel$|^admin_menu$"),
+            CommandHandler("start", cancel_admin_conv),
+            MessageHandler(MAIN_MENU_FILTER, cancel_admin_conv),
+        ],
+        conversation_timeout=300,
+        allow_reentry=True,
+    )
+    app.add_handler(revoke_conv)
 
     # ConversationHandler: добавить админа
     add_admin_conv = ConversationHandler(
