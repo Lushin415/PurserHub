@@ -1,5 +1,6 @@
 """Обработчики черного списка"""
 import asyncio
+import html as html_module
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Bot
 from telegram.ext import (
     ContextTypes,
@@ -16,6 +17,29 @@ from parserhub.db_service import DatabaseService
 from parserhub.api_client import WorkersAPI
 from parserhub.validators import Validators
 from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton
+
+
+_SINGLE_MSG_LIMIT = 3400  # Максимум символов text_сообщения при которых всё помещается в одно сообщение
+
+
+def _split_text(text: str, chunk_size: int = 4000) -> list[str]:
+    """Разбить длинный текст на части не длиннее chunk_size.
+    Пытается разбить по переносу строки, чтобы не резать посередине предложения."""
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    while len(text) > chunk_size:
+        split_at = text.rfind('\n', 0, chunk_size)
+        if split_at == -1:  # нет переноса строки — режем жёстко
+            split_at = chunk_size
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip('\n')
+
+    if text:
+        chunks.append(text)
+
+    return chunks
 
 
 # Состояния для ConversationHandler
@@ -153,8 +177,7 @@ async def _blacklist_search_task(
             username_info = info.get("username", "—")
             phone = info.get("phone", "—")
             found_user_id = info.get("user_id", "—")
-            raw_text = result.get("message_text", "")
-            msg_text = raw_text[:3800] + "...\n[текст обрезан]" if len(raw_text) > 3800 else raw_text
+            raw_text = result.get("message_text", "") or ""
 
             match_type = result.get("match_type", "")
             match_labels = {
@@ -164,14 +187,32 @@ async def _blacklist_search_task(
             }
             match_label = match_labels.get(match_type, "")
 
-            text = (
+            header = (
                 f"⚠️ <b>Пользователь найден в черном списке!</b>\n"
                 f"<i>Найден {match_label}</i>\n\n"
                 f"<b>Username:</b> {username_info}\n"
                 f"<b>Телефон:</b> {phone}\n"
-                f"<b>User ID:</b> {found_user_id}\n\n"
-                f"<b>Текст записи:</b>\n<i>{msg_text}</i>"
+                f"<b>User ID:</b> {found_user_id}"
             )
+
+            # Если текст короткий — отправляем одним сообщением (как раньше)
+            # Если длинный — шапка отдельно, текст кусками
+            safe_text = html_module.escape(raw_text)
+            if len(raw_text) <= _SINGLE_MSG_LIMIT:
+                text = header + (f"\n\n<b>Текст записи:</b>\n<i>{safe_text}</i>" if safe_text else "")
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            else:
+                await bot.send_message(chat_id=chat_id, text=header, parse_mode="HTML")
+                chunks = _split_text(safe_text)
+                total = len(chunks)
+                for i, chunk in enumerate(chunks):
+                    if total > 1:
+                        label = f"<b>Текст записи [{i + 1}/{total}]:</b>\n"
+                    else:
+                        label = "<b>Текст записи:</b>\n"
+                    await bot.send_message(chat_id=chat_id, text=label + chunk, parse_mode="HTML")
+                    if i < total - 1:
+                        await asyncio.sleep(0.3)
         else:
             steps = result.get("steps_done", [])
             steps_text = ", ".join(steps) if steps else "—"
@@ -186,8 +227,7 @@ async def _blacklist_search_task(
                 f"<b>Сообщений проверено:</b> {result.get('messages_checked', 0)}\n"
                 f"<b>Чатов проверено:</b> {len(result.get('chats_checked', []))}"
             )
-
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
 
     except HTTPStatusError as e:
         detail = e.response.json().get("detail", "").lower()
