@@ -614,9 +614,9 @@ async def stop_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.exception("Ошибка остановки задачи")
-        # Если сервис недоступен — принудительно завершаем в локальной БД
-        await db.delete_task(task_id)
-        await query.answer("⚠️ Задача завершена локально (сервис недоступен)")
+        # НЕ удаляем из bot.db при ошибке — задача может продолжать работать в сервисе
+        # Для принудительной очистки используется force_close_task
+        await query.answer("⚠️ Не удалось остановить задачу в сервисе. Попробуйте ещё раз.")
         await show_my_tasks(update, context)
 
 
