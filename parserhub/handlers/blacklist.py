@@ -19,10 +19,11 @@ from parserhub.validators import Validators
 from parserhub.handlers.start import cancel_and_return_to_menu, MAIN_MENU_FILTER, MenuButton
 
 
-_SINGLE_MSG_LIMIT = 3400  # Максимум символов text_сообщения при которых всё помещается в одно сообщение
+_TG_LIMIT = 4096       # Лимит Telegram на одно сообщение
+_CHUNK_SIZE = 3800     # Размер куска текста с запасом на label и HTML-теги
 
 
-def _split_text(text: str, chunk_size: int = 4000) -> list[str]:
+def _split_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
     """Разбить длинный текст на части не длиннее chunk_size.
     Пытается разбить по переносу строки, чтобы не резать посередине предложения."""
     if len(text) <= chunk_size:
@@ -195,24 +196,21 @@ async def _blacklist_search_task(
                 f"<b>User ID:</b> {found_user_id}"
             )
 
-            # Если текст короткий — отправляем одним сообщением (как раньше)
-            # Если длинный — шапка отдельно, текст кусками
+            # Проверяем реальную длину финального сообщения (с HTML-тегами и экранированием)
             safe_text = html_module.escape(raw_text)
-            if len(raw_text) <= _SINGLE_MSG_LIMIT:
-                text = header + (f"\n\n<b>Текст записи:</b>\n<i>{safe_text}</i>" if safe_text else "")
-                await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            single_msg = header + (f"\n\n<b>Текст записи:</b>\n<i>{safe_text}</i>" if safe_text else "")
+            if len(single_msg) <= _TG_LIMIT:
+                await bot.send_message(chat_id=chat_id, text=single_msg, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id=chat_id, text=header, parse_mode="HTML")
-                chunks = _split_text(safe_text)
-                total = len(chunks)
-                for i, chunk in enumerate(chunks):
-                    if total > 1:
-                        label = f"<b>Текст записи [{i + 1}/{total}]:</b>\n"
-                    else:
-                        label = "<b>Текст записи:</b>\n"
-                    await bot.send_message(chat_id=chat_id, text=label + chunk, parse_mode="HTML")
-                    if i < total - 1:
-                        await asyncio.sleep(0.3)
+                if safe_text:
+                    chunks = _split_text(safe_text)
+                    total = len(chunks)
+                    for i, chunk in enumerate(chunks):
+                        label = f"<b>Текст записи [{i + 1}/{total}]:</b>\n" if total > 1 else "<b>Текст записи:</b>\n"
+                        await bot.send_message(chat_id=chat_id, text=label + chunk, parse_mode="HTML")
+                        if i < total - 1:
+                            await asyncio.sleep(0.3)
         else:
             steps = result.get("steps_done", [])
             steps_text = ", ".join(steps) if steps else "—"
