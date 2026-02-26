@@ -100,7 +100,7 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     contact_line = (
-        "\n\n📩 Для оформления подписки обратитесь к @IKM0000"
+        "\n\n📩 Для оформления подписки обратитесь к @SVV0000"
         if not config.PROVIDER_TOKEN else ""
     )
     text = f"💳 <b>Подписка</b>\n\n{status_text}{contact_line}"
