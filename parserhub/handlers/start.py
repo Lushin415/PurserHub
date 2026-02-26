@@ -14,7 +14,7 @@ class MenuButton:
     REALTY = "🏠 Поиск объявлений"
     BLACKLIST = "⚫ Черный список"
     SUBSCRIPTION = "💳 Подписка"
-    SETTINGS = "💬 Обратная связь"
+    SETTINGS = "❓ Помощь"
     ADMIN = "🔧 Админ-панель"
     BACK = "🔙 Назад"
     CANCEL = "❌ Отмена"

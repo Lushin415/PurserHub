@@ -89,6 +89,14 @@ async def post_init(application: Application):
     application.bot_data["cleaner_task"] = asyncio.create_task(
         _subscription_cleaner_loop(application)
     )
+    # Запустить фоновую очистку зависших сессий авторизации Pyrogram
+    application.bot_data["auth_cleaner_task"] = asyncio.create_task(
+        _auth_cleaner_loop(application)
+    )
+    # Запустить фоновую очистку словаря антиспама
+    application.bot_data["antispam_task"] = asyncio.create_task(
+        _antispam_cleaner_loop(application)
+    )
 
     # Установить команды бота (Menu Button)
     commands = [
@@ -130,6 +138,33 @@ async def _reconcile_tasks(db: DatabaseService, workers_url: str, realty_url: st
     logger.info(f"Reconcile завершён: проверено {len(tasks)}, удалено зомби: {removed}")
 
 
+async def _antispam_cleaner_loop(application: Application):
+    """Фоновая задача: очистка словаря антиспама для освобождения RAM"""
+    from parserhub.validators import AntiSpam
+    while True:
+        try:
+            await asyncio.sleep(600)  # Раз в 10 минут
+            AntiSpam.cleanup_old()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"AntiSpam cleaner error: {e}")
+
+
+async def _auth_cleaner_loop(application: Application):
+    """Фоновая задача: очистка зависших сессий авторизации Pyrogram"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Проверять каждые 5 минут
+            session_mgr = application.bot_data.get("session_manager")
+            if session_mgr:
+                await session_mgr.cleanup_stale_clients()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auth cleaner error: {e}")
+
+
 async def _subscription_cleaner_loop(application: Application):
     """Фоновая задача: удаление истёкших подписок раз в сутки"""
     while True:
@@ -160,10 +195,16 @@ async def post_shutdown(application: Application):
     if "realty_api" in application.bot_data:
         await application.bot_data["realty_api"].close()
 
-    # Отменить фоновую задачу очистки подписок
-    cleaner_task = application.bot_data.get("cleaner_task")
-    if cleaner_task and not cleaner_task.done():
-        cleaner_task.cancel()
+    # Отменить все фоновые задачи и дождаться их завершения
+    tasks_to_cancel = []
+    for task_key in ("cleaner_task", "auth_cleaner_task", "antispam_task"):
+        task = application.bot_data.get(task_key)
+        if task and not task.done():
+            task.cancel()
+            tasks_to_cancel.append(task)
+
+    if tasks_to_cancel:
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
     logger.info("Бот остановлен")
 

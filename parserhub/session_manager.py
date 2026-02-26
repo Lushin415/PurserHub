@@ -1,5 +1,6 @@
 """Управление Pyrogram сессиями пользователей"""
 import os
+import time
 import asyncio
 from pathlib import Path
 from typing import Dict, Literal, Optional
@@ -26,6 +27,8 @@ class SessionManager:
         self._pending_clients: Dict[int, Client] = {}
         self._phone_hashes: Dict[int, str] = {}
         self._phones: Dict[int, str] = {}
+        # Хранилище времени начала авторизации для очистки зависших сессий
+        self._auth_timestamps: Dict[int, float] = {}
 
     def get_session_path(self, user_id: int, session_type: Literal["parser", "blacklist"]) -> str:
         """
@@ -94,6 +97,8 @@ class SessionManager:
             self._pending_clients[user_id] = client
             self._phone_hashes[user_id] = phone_code_hash
             self._phones[user_id] = phone
+            # Фиксируем абсолютное время отправки кода (Unix time)
+            self._auth_timestamps[user_id] = time.time()
 
             logger.info(f"[AUTH START] ✅ Код отправлен на {phone} для user {user_id}, тип: {session_type}")
             logger.info(f"[AUTH START] Клиент сохранён в pending_clients, user_id={user_id}")
@@ -215,3 +220,19 @@ class SessionManager:
         self._pending_clients.pop(user_id, None)
         self._phone_hashes.pop(user_id, None)
         self._phones.pop(user_id, None)
+        self._auth_timestamps.pop(user_id, None)
+
+    async def cleanup_stale_clients(self, max_age_seconds: int = 600):
+        """
+        Удаляет клиентов, которые зависли на этапе ввода кода дольше 10 минут.
+        Предотвращает утечку RAM и TCP-соединений.
+        """
+        now = time.time()
+        for uid in list(self._pending_clients.keys()):
+            if now - self._auth_timestamps.get(uid, 0) > max_age_seconds:
+                try:
+                    await self._pending_clients[uid].disconnect()
+                except Exception:
+                    pass
+                self._cleanup_user(uid)
+                logger.info(f"Удален зависший клиент авторизации для user {uid}")
