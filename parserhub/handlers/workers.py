@@ -154,10 +154,7 @@ async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     await update.message.reply_text(
         f"👷 <b>Режим: {mode_name}</b>\n\n"
-        "🏙 <b>Выберите город для мониторинга:</b>\n\n"
-        "⚠️ При выборе конкретного города поиск происходит только в чатах, "
-        "где указан этот город в названии топика. "
-        "Общие чаты без указания города исключаются из поиска.",
+        "🏙 <b>Выберите город для мониторинга:</b>\n\n",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -241,10 +238,6 @@ async def receive_date_to(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     return await ask_prices(update, context)
 
-
-
-
-
 async def ask_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Запросить фильтр по ценам"""
     text = (
@@ -301,10 +294,6 @@ async def receive_max_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(warning)
 
     return await show_confirmation(update, context)
-
-
-
-
 
 async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Показать подтверждение запуска"""
